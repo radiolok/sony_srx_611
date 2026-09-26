@@ -21,6 +21,9 @@ Context file for AI coding agents working anywhere in this project.
    the `README.md` §4 table.
 4. **Ask when unsure.** If you are not sure about an idea, interpretation or direction,
    ask the user instead of deciding on your own.
+5. **Take care of machine resources.** The project may run on small nodes. Prefer light
+   tools (Python, capstone) over heavy ones (full Ghidra analysis, decompile-all), and ask
+   the user before starting any long-running heavy job.
 
 ## 1. What this project is
 
@@ -329,6 +332,20 @@ these:
     (`CS_MODE_32`) while the SRXWIN DOS tools are 16-bit (`CS_MODE_16`, Borland large
     model: one code segment per source module, far calls `9A off seg`).
   - For work that needs the DB, prepare an IDAPython script and ask the user to run it.
+### 7.1 Choosing tools
+
+- Prefer the light workflow: a **capstone linear sweep** plus Python scripts (see the
+  architecture report §13). Use Ghidra only for single functions (`DecompileByName.java`),
+  one JVM at a time, and ask before any full analysis or decompile-all run.
+- A killed Ghidra run leaves a stale `~/ghidra_projects/SRX611.lock`. Remove it only when no
+  `analyzeHeadless` process is running.
+- Keep scratch output (listings, dumps) in the session scratchpad, not in the repo.
+- The saved Ghidra project currently holds only **seeded 3-byte function bodies** (the earlier
+  full analysis was not saved). Single-function decompiling works, but listing/xref exports
+  are incomplete. Rebuilding it (`import_rom1c.sh`) is a heavy job.
+
+### 7.2 Ghidra, IDA rebase and IDA batch runs
+
 - **Ghidra (on the Linux checkout, since 2026-09-26):** Ghidra 12.1.4 at
   `~/opt/ghidra_12.1.4_PUBLIC` with Temurin JDK 21 at `~/opt/jdk-21*`. These are user-level
   tarballs and not part of the repo.

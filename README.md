@@ -1,8 +1,9 @@
 # Sony SRX-611 — Reverse Engineering
 
-Static (IDA-based) reverse engineering of the **Sony SRX-611 SCARA robot** and its
-controller/board firmware. This repository collects the extracted firmware images, the
-IDA databases, component datasheets and the analysis notes.
+Static reverse engineering of the **Sony SRX-611 SCARA robot** and its controller/board
+firmware (IDA Pro, Ghidra, capstone/Python). This repository collects the extracted
+firmware images, the IDA databases, the original PC host tools, analysis reports and
+helper scripts.
 
 ![Sony SRX-611 SCARA robot](img/main.jpg)
 
@@ -18,7 +19,9 @@ servo motors with **absolute encoders** (battery-backed), so it is maintenance-f
 needs no home return in normal use.
 
 - **Kinematics:** SCARA, **4 axes** (X, Y, Z, R).
-- **Drive:** all-axis AC servo, **software servo** (no separate servo controller per axis).
+- **Drive:** all-axis AC servo, **software servo** (manual wording). The unit studied here
+  has **four physically separate servo controller boards**, one per axis. Each has a
+  NEC V810 CPU and is linked to the main CPU through dual-port RAM (see §3.1).
 - **Position detection:** absolute method, battery back-up.
 - **Programming language:** **LUNA** (Ver. 5.0), compiled on DOS (≥ 5.0), debugged from
   Windows with the SRX Platform kit; teaching via the optional teaching pendant.
@@ -59,8 +62,8 @@ and long-Z versions `L**45` (Z stroke 450 mm).
 | Output | motor power total max 1000 W |
 | Program storage | 3072 points per program, 176 kB total across all tasks |
 | Memory card | PC Card (PCMCIA 2.1 Type 1) |
-| Serial I/F | RS-232C × 3 (teaching pendant, programming device, general purpose) |
-| Expansion | 3 slots (vision board, I/O board, …) |
+| Serial I/F | RS-232C × 3 (teaching pendant, programming device, general purpose); in firmware these are three 8251A USARTs, ch 1/2/3 |
+| Expansion | 3 slots (vision board, I/O board, …); the firmware scans **5 slot windows** shared by servo and I/O boards |
 | Power | single-phase AC 200–240 V ±10 %, 50/60 Hz, 1.5 kVA |
 | Dimensions / weight | 430 (w) × 440 (d) × 240.5 (h) mm ≈ 5U DIN; 25 kg |
 | Environment | 0–40 °C, 35–90 % RH (non-condensing) |
@@ -77,7 +80,7 @@ All paths are relative to the project root.
 | **CPU boot EPROM** | `FW/SRX6-CPU/2/U23_M27C256B@DIP28.BIN`, `FW/SRX6-CPU/1/U26_….BIN`, `FW/SRX6-CPU/M27C256B@DIP28.BIN` (all identical) | **M27C256B**, 32 KB | Intel 80486 | Boot/monitor EPROM, separate from the main image | Preliminary — IDA DBs (`80486r`) exist |
 | **Teach pendant (TP)** | `FW/TP/IC6_M27C256B@DIP28.BIN` (32 KB) | **M27C256B** | **Hitachi HD64180/Z180** | Thin terminal: keypad, 20-char display, serial command interpreter | **Analysed** — see [`doc/TP_firmware_structure.md`](doc/TP_firmware_structure.md) |
 | **Servo board** | `FW/SRX6-SERVO/ROM_SERVO.bin` (256 KB); sources `1/U41_P28F010@DIP32.HEX`, `1/U42_P28F010@DIP32.BIN`; PLD `2/U43.GAL16V8B.JED` | 2× **P28F010**, U41+U42, 128 KB each (byte-interleaved: U41 = even bytes) | **NEC V810 (µPD70732)**, 16-bit bus | Servo board firmware ("Servo Board Monitor ©1995 Sony"); talks to the CPU board through a slot dual-port RAM | IDA DB `ROM_SERVO.bin.i64` exists; CPU identified, not written up |
-| **Servo-I/O board** | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` (64 KB each) | 2× **M27C512** | 32-bit RISC (likely **NEC µPD70732 / V810**) | Servo-I/O controller pair (no ASCII strings in the dumps) | Not started |
+| **Servo-I/O board** | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` (64 KB each) | 2× **M27C512** | unconfirmed (V810 guessed) | Servo-I/O controller pair (no ASCII strings in the dumps) | Not started |
 | **PC-side tools (SRXWIN)** | `SRXWIN/*.EXE`, `SRXWIN/SRXMONIE.HLP` (19 files, MD5-verified) | — | x86 DOS / Win16 host PC | Sony host toolchain (1991–1996): `LUNNA`/`POINT`/`PLC` compilers, `ANNUL`/`DISPON`/`DPLC` decompilers, `SEND`/`RECALL`/`FILES`/`FDEL`/`HIST`/`MONIT`, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI `SRXMONIE`, installer | **Analysed** — structure, serial protocol, LUNA/PLC token tables, help text (see §3.2); replacement spec [`doc/SRXWIN-NG.md`](doc/SRXWIN-NG.md) |
 
 Component datasheets, manuals and design files (SRX operation manual, user training
@@ -100,15 +103,25 @@ preliminary IDA databases.
 - Platform established: 80486 in flat 32-bit protected mode, runtime base
   `0xFFE00000 + file offset`, RTOS **pSOS+/386 V2.0.I** (`int 90h` kernel calls,
   `int 91h` I/O supervisor).
-- I/O architecture mapped (2026-09-26):
-  - 3× 8251A USARTs: TP, PC host, user RS-232C;
-  - 8259A pair, 8254;
-  - five slot dual-port-RAM windows for the servo and I/O boards, with the per-robot servo
-    cycle;
-  - RTC, EEPROM, PC-card window, and the pSOS task model.
-  Details: architecture report v2.
-- Subsystems mapped: kernel/OS, config validation, parameter DB, PLC engine,
-  motion/point, teach-pendant UI, LUNA language, error reporting.
+- **Hardware interfaces mapped** (architecture report v2, 2026-09-26):
+  - three 8251A USARTs: ch 1 = **teach pendant** (ESC frames without a checksum,
+    `SRX6`↔`TP4` handshake, 38 commands), ch 2 = **PC host** (SRXWIN protocol), ch 3 =
+    **user RS-232C** (LUNA `READ/WRITE/RS*`);
+  - 8259A PIC pair, 8254 timer (10 ms tick and baud clocks);
+  - **five slot dual-port-RAM windows** (`0x700000 + n·0x10000`) for servo and I/O
+    boards, each with its own IRQ. The per-robot servo task runs once per servo-board
+    interrupt: it reads feedback, runs the motion and the **PLC scan**, and writes the
+    references back;
+  - RTC, 8 KB EEPROM, PC-card window, optional 4-port serial board.
+- **Software structure:** pSOS+ task model (INIT, SYST, TPCT, PCCT, PLCT, SVTn, TJTn,
+  LTnn LUNA tasks, ERRT, …), 5 device drivers, the LUNA statement-executor table, and the
+  error path.
+- **Strings are used from RAM.** Boot copies all strings and their pointer tables from ROM to
+  RAM, which explains the missing string xrefs. The RAM image is rebuilt with
+  [`tools/cpu/rom1c_raminit.py`](tools/cpu/rom1c_raminit.py).
+- Also mapped: config validation, PLC engine, motion/point, teach-pendant UI, LUNA language.
+  Several v1/IDA names turned out wrong (e.g. `db_access` = TP link, `dma8237_init` = USART
+  init); the corrections are listed in the architecture report §2.
 - **Error system analysed**: full `E000…E401` message table; identified
   **`E401 = DSS off error`** (SMART) —
   [`SRX-611_error_401_DSS_report.md`](doc/SRX-611_error_401_DSS_report.md).
@@ -146,14 +159,20 @@ preliminary IDA databases.
 ### 3.3 Planned / remaining
 
 - Complete the CPU-firmware decompilation (several switch-heavy functions must be
-  hand-reconstructed; see `AGENTS.md` §8).
-- Servo board: document `ROM_SERVO.bin` (monitor console, amplifier diagnostics).
+  hand-reconstructed; see `AGENTS.md` §8). Apply the v2 function names to the IDA DB.
+- Confirm on the real unit which slots hold the four servo controllers, and what is in
+  slot 5.
+- Servo board: document `ROM_SERVO.bin` (V810, code at `0x00100000`): monitor console,
+  amplifier diagnostics, and its side of the dual-port-RAM protocol (meaning of the
+  per-axis fields).
 - Servo-I/O board: load `U7`/`U18` into IDA and identify the CPU.
 - PC tools (`SRXWIN`): name the SRX Platform monitoring commands, decode the LUNA `.OBJ`
   statement encoding, and confirm the protocol on hardware (SRXWIN-NG stage 1).
 - Name the 152 controller-side command handlers (the server task and table were found at
   `0x50D00`/`0x51828`) and label `token_dispatch` with the LUNA token codes.
-- Cross-map the CPU↔TP↔servo↔servo-I/O communication protocols.
+- Teach pendant: confirm the TP commands still marked as hypotheses (architecture report
+  §8.1).
+- Servo-I/O board: find out how it connects to the CPU board (slot I/O board or not).
 
 ---
 
@@ -174,4 +193,14 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`LUNA_token_map.md`](doc/LUNA_token_map.md) | LUNA keyword/token table (from `LUNNA.EXE`), ANNUL cross-check, PLC mnemonic table |
 | [`SRXMONIE_help.md`](doc/SRXMONIE_help.md) | Full extracted text of `SRXMONIE.HLP` (LUNA/PLC reference, GUI, error codes) |
 
-The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md).
+The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md);
+the per-session work log is [`history.md`](history.md).
+
+### 4.1 Tools
+
+| Path | Purpose |
+|---|---|
+| [`tools/cpu/rom1c_raminit.py`](tools/cpu/rom1c_raminit.py) | Rebuild the CPU firmware's initial RAM image; find a string's RAM address (`--find`) and pointer tables (`--ptr`) |
+| [`tools/ghidra/`](tools/ghidra) | Headless Ghidra: import `ROM1-C.bin` at `0xFFE00000`, seed functions, label the host protocol, print decompiled C (heavy on a small machine) |
+| [`tools/ida/rebase_ffe00000.py`](tools/ida/rebase_ffe00000.py) | IDAPython: rebase `ROM1-C.bin.i64` to `0xFFE00000` so the jump tables resolve (run on a copy) |
+| [`tools/srxwin/`](tools/srxwin) | SRXWIN helpers: WinHelp extractor, LUNA symbol-table dumper, SRXMONIE command scanner |
