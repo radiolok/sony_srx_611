@@ -4,6 +4,15 @@ Context file for AI coding agents working anywhere in this project.
 Project root: `D:\radiolok@oc.urlnn.ru\Datasheets\SONY SRX`
 Main analysis workdir (CPU-board firmware): `D:\radiolok@oc.urlnn.ru\Datasheets\SONY SRX\FW\SRX6-CPU\2`
 
+Notice: For any investigations generate Markdown artifacts or modify existed.
+
+Each session must add new bullet into history.md file which describe in 1-2 sentence what it did
+Each new user data must update this description. e.g.
+
+- Made SRXWIN analysis, save artifacts. etc.
+
+Notice: If you are not sure is some ideas - ask a question instead of taking the desicion by your own
+
 ## 1. What this project is
 
 Reverse engineering (static, IDA-based) of the **Sony SRX-611 SCARA robot controller**

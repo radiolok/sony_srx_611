@@ -132,5 +132,6 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`TP_firmware_structure.md`](doc/TP_firmware_structure.md) | Teach-pendant (HD64180) memory map, command dispatcher, `"SRX6"`↔`"TP4"` handshake |
 | [`LUNA_analysis.md`](doc/LUNA_analysis.md) | LUNA language subsystem analysis (companion to `FW\SRX6-CPU\2\c_decomp_luna\`) |
 | [`function_popularity.md`](doc/function_popularity.md) | All 1298 CPU functions ranked by call popularity + comments |
+| [`SRXWIN_tools_report.md`](doc/SRXWIN_tools_report.md) | PC-side host toolchain (`SRXWIN`): LUNA/POINT/PLC compilers & decompilers, SEND/RECALL/FILES/FDEL/HIST/MONIT, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI (`SRXMONIE`), installer, formats, serial protocol |
 
 The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md).
