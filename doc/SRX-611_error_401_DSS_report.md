@@ -41,7 +41,7 @@ exception strings:
 ...
 0xD998B  "SPD ... ｴﾗｰ"  0xD99A3 "SPD over speed error"    -> E400
 0xD99BB  "DSS ｵﾌ ｴﾗｰ"  0xD99C7 "DSS off error"           -> E401
-0xD99D2  (LUNA opcode/keyword table starts: END, MC, MCE, JP( ...)
+0xD99D2  (PLC mnemonic table starts: END, MC, MCE, JP( ... - see LUNA_token_map.md)
 ```
 
 The table is indexed **by error code**, not by a 1:1 sequence — the codes have gaps
@@ -186,8 +186,15 @@ __int16 sys_req_27h(char a1, __int16 a2, unsigned __int16 a3) {
 }
 ```
 
-`os_syscall_90h_27h` loads `EAX = 0x27` and executes `int 90h` (the OS+/386 syscall
-trap), passing the error request block.
+`os_syscall_90h_27h` loads `EAX = 0x27` and executes `int 90h`, passing the error request
+block.
+
+> **Update 2026-09-26** (see `SRX-611_firmware_architecture.md` §5 and §9.2): the OS is
+> **pSOS+/386**, and function `0x27` is **`q_send`**. `sys_req_27h` posts a 4-word message to
+> the queue of the error task **ERRT** (`0xBDDCC`). ERRT takes the text from the RAM pointer
+> table at `0x26F4` (`code*8 + lang*4`; E401 → RAM `0x3380` → `"DSS off error"`) and sends
+> it to the pendant over serial ch 1. The system-input image `0x62B8` is filled from an **I/O
+> board's slot DPRAM window** by `0x108FC` (architecture report §8.4).
 
 ---
 

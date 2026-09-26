@@ -29,6 +29,12 @@ opcodes into mnemonic text — this is what the TP "LIST" view uses.
 
 ## 2. Instruction set (opcode/keyword table @ `0xD99D2`)
 
+> **Correction (2026-09-26):** this table is the **PLC** instruction-mnemonic table. It is
+> identical in content and order to the PLC decompiler `SRXWIN/DPLC.EXE`. It is not the LUNA
+> instruction set, and `N` is a record-header byte, not a mnemonic. The real LUNA keyword/token
+> table (230 entries, from `LUNNA.EXE`) is in [`LUNA_token_map.md`](LUNA_token_map.md). The rest of
+> this section is kept as originally written.
+
 The VM instruction set, in table order:
 
 | Opcode | Meaning (inferred) |

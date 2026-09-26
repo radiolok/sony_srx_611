@@ -1,6 +1,7 @@
 # SRXWIN host tools — structure report (Sony SRX)
 
-**Scope:** `SRXWIN\SRXWIN\*.EXE` (+ `SRXWIN.zip`, `SRXMONIE.HLP`, `SRXMONI.ICO`)
+**Scope:** `SRXWIN/*.EXE`, `SRXWIN/SRXMONIE.HLP`, `SRXWIN/SRXMONI.ICO` (in the repository since 2026-09-26; originally `SRXWIN\SRXWIN\` + `SRXWIN.zip` on the workstation)
+**Deep-dive follow-ups:** [`SRXWIN_protocol.md`](SRXWIN_protocol.md) (serial protocol), [`LUNA_token_map.md`](LUNA_token_map.md) (LUNA/PLC keyword and token tables), [`SRXMONIE_help.md`](SRXMONIE_help.md) (full extracted help text).
 **Era:** 1991‑02 … 1996‑11 · **Target controller:** Sony SRX‑5xx/6xx (SRX‑611)
 **Relation to firmware:** host side of the LUNA/PLC toolchain and serial protocol analysed in
 `SRX-611_firmware_architecture.md`, `LUNA_analysis.md`, `function_popularity.md`.
@@ -107,8 +108,9 @@ Default working files: `srxdata.cdt` (common data), `srxrelay.kee` (keep relays)
   decompilation vocabulary (`DEF:`, `GO %s`, `CALL %s`, `A(%s)`, `B(%s)`, `(%d)`, `,ON)`/`,OF)`
   for I/O, `FOR … TO … STEP`).
 - Carries an extensive opcode→mnemonic table (arithmetic, I/O, motion, RS‑232, task control) —
-  host‑side counterpart of the firmware's LUNA token dispatcher (`token_dispatch` @`0xC5CC4`,
-  table @`0xD99D2`).
+  host‑side counterpart of the firmware's LUNA token dispatcher (`token_dispatch` @`0xC5CC4`).
+  *(Correction 2026-09-26: the firmware table @`0xD99D2` is the **PLC** mnemonic table, not a LUNA
+  one. The complete LUNA table is the 230-entry symbol table in `LUNNA.EXE`; see `LUNA_token_map.md`.)*
 
 **`POINT.EXE` — point/coordinate compiler** (`POINT 5.0 Version 1.04, Copyright SONY Corp. 1983,1996`)
 
@@ -257,10 +259,13 @@ directory (default `SRXWIN\`), copies the platform files and creates the Windows
 - **`SRXMONIE.HLP` contains the complete error‑code guide** — contexts `E001…E359`, `E361`,
   `E381/E382`, `E4001…E4050`, `E4102`, `E4150/E4151`, `E4300…E4310`, `E4402/E4408`, plus compiler
   math codes `M6101…M6111`. The standalone manual ends at E400; the HLP is a useful comparison
-  source (and includes E401 "DSS off", see `SRX-611_error_401_DSS_report.md`).
+  source. *(Correction 2026-09-26: the HLP does **not** contain E400 or E401. Its system-error list
+  ends at E382 and there is no DSS/SPD text. E401 "DSS off" is known only from the firmware; see
+  `SRX-611_error_401_DSS_report.md`. The E4001–E4050 codes are controller **protocol status**
+  values (status s = E4000+s), see `SRXWIN_protocol.md` §2.1.)*
 - **LUNA/PLC keyword tables** in LUNNA/ANNUL/PLC/DPLC are the host view of the firmware's
-  `token_dispatch` table (`0xD99D2`) and LUNA/PLC engines — directly usable to resolve the
-  firmware's "invalid jump table" token decode.
+  LUNA token dispatcher (`token_dispatch` @`0xC5CC4`) and PLC engine; the firmware table @`0xD99D2`
+  matches DPLC's PLC mnemonic table exactly. Decoded in `LUNA_token_map.md`.
 - **Serial framing** implied by the common message set (ESC code, checksum, byte‑count, timeouts)
   is the host side of the CPU board's serial/event task that raises error requests via
   `sys_req_27h`.
@@ -288,13 +293,13 @@ directory (default `SRXWIN\`), copies the platform files and creates the Windows
 
 ## 7. Reverse‑engineering leads
 
-1. `SRXMONIE.HLP` is a compressed Windows help file; its topic tree is intact and its embedded
-   RTF (e.g. `hlp\afxmenue.rtf`) can be recovered to get the **full LUNA/PLC command reference**
-   with numbers and examples.
-2. `LUNNA.EXE`/`ANNUL.EXE` opcode tables can be diffed against `ROM1-C.bin`'s `0xD99D2` table to
-   label every LUNA token with its exact spelling and argument grammar.
-3. The common message module (`messg.c`) maps host error strings to numeric controller response
-   codes — useful for annotating the firmware's error/event task and `sys_req_27h` call sites.
+1. ~~`SRXMONIE.HLP` … recover the full LUNA/PLC command reference~~ — **done**: all 333 topics
+   extracted to `SRXMONIE_help.md` (`tools/srxwin/hlp_extract.py`).
+2. ~~Diff LUNNA/ANNUL opcode tables against `0xD99D2`~~ — **done, with a correction**: `0xD99D2` is
+   the PLC table. LUNA token codes come from LUNNA's symbol table (`LUNA_token_map.md`). Still open:
+   `.OBJ` statement encoding.
+3. ~~Map `messg.c` host errors to controller response codes~~ — **done**: see `SRXWIN_protocol.md`
+   §2.1 (status byte ↔ E4000+s ↔ DOS message 1000…).
 4. `INI_RS.EXE` documents the default serial line format used by the platform (the GUI hard‑codes
    `COM1:/COM2: 9600,n,8,2`), constraining the controller's ASCI/UART configuration.
 5. `DPLC.EXE`/`PLC.EXE` LD‑style encoder tables (`R##C K##C T### C### I### L###`) mirror the

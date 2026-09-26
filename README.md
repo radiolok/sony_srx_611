@@ -73,16 +73,16 @@ All paths are relative to the project root.
 
 | Firmware | Files | Device | Target CPU | Description | Research status |
 |---|---|---|---|---|---|
-| **CPU main firmware** | `FW\SRX6-CPU\2\ROM1-C.bin` (1 MB) | 2× **MT28F400B5** flash, U24+U25, 512 KB each | **Intel 80486** (16-bit real mode, 32-bit regs) | Controller OS (`OS+/386 V2.0`) + robot application + **LUNA** interpreter | **In progress — primary target.** IDA DB `ROM1-C.bin.i64`, 1298 annotated functions, architecture & error reports, partial C decompilation |
-| **CPU boot EPROM** | `FW\SRX6-CPU\2\U23_M27C256B@DIP28.BIN`, `FW\SRX6-CPU\1\U26_….BIN`, `FW\SRX6-CPU\M27C256B@DIP28.BIN` (all identical) | **M27C256B**, 32 KB | Intel 80486 | Boot/monitor EPROM, separate from the main image | Preliminary — IDA DBs (`80486r`) exist |
-| **Teach pendant (TP)** | `FW\TP\IC6_M27C256B@DIP28.BIN` (32 KB) | **M27C256B** | **Hitachi HD64180/Z180** | Thin terminal: keypad, 20-char display, serial command interpreter | **Analysed** — see [`doc\TP_firmware_structure.md`](doc/TP_firmware_structure.md) |
-| **Servo board** | `FW\SRX6-SERVO\ROM_SERVO.bin` (256 KB); sources `1\U41_P28F010@DIP32.HEX`, `1\U42_P28F010@DIP32.BIN`; PLD `2\U43.GAL16V8B.JED` | 2× **P28F010**, U41+U42, 128 KB each (byte-interleaved: U41 = even bytes) | servo amplifier MCU (16-bit bus) | Servo amplifier/monitor firmware ("Servo Board Monitor ©1995 Sony") | IDA DB `ROM_SERVO.bin.i64` exists; not written up |
-| **Servo-I/O board** | `FW\SERVO_IO\1\U7_M27C512@DIP28.BIN`, `FW\SERVO_IO\1\U18_M27C512@DIP28.BIN` (64 KB each) | 2× **M27C512** | 32-bit RISC (likely **NEC µPD70732 / V810**) | Servo-I/O controller pair (no ASCII strings in the dumps) | Not started |
-| **PC-side tools** | `SRXWIN\SRXWIN\*.EXE` (+ `SRXWIN.zip`) | — (x86 DOS/Windows) | host PC | `LUNNA.EXE`/`LUNNAPR.EXE` (LUNA), `SRXMONIE.EXE` (monitor), `PLC.EXE`, `POINT.EXE`, `MONIT.EXE`, `RECALL.EXE`, `SEND.EXE`, … | Not started |
+| **CPU main firmware** | `FW/SRX6-CPU/2/ROM1-C.bin` (1 MB) | 2× **MT28F400B5** flash, U24+U25, 512 KB each | **Intel 80486** (32-bit flat protected mode) | RTOS **pSOS+/386 V2.0.I** (Integrated Systems) + robot application + **LUNA** interpreter | **In progress — primary target.** IDA DB `ROM1-C.bin.i64`, 1298 annotated functions, architecture & error reports, partial C decompilation |
+| **CPU boot EPROM** | `FW/SRX6-CPU/2/U23_M27C256B@DIP28.BIN`, `FW/SRX6-CPU/1/U26_….BIN`, `FW/SRX6-CPU/M27C256B@DIP28.BIN` (all identical) | **M27C256B**, 32 KB | Intel 80486 | Boot/monitor EPROM, separate from the main image | Preliminary — IDA DBs (`80486r`) exist |
+| **Teach pendant (TP)** | `FW/TP/IC6_M27C256B@DIP28.BIN` (32 KB) | **M27C256B** | **Hitachi HD64180/Z180** | Thin terminal: keypad, 20-char display, serial command interpreter | **Analysed** — see [`doc/TP_firmware_structure.md`](doc/TP_firmware_structure.md) |
+| **Servo board** | `FW/SRX6-SERVO/ROM_SERVO.bin` (256 KB); sources `1/U41_P28F010@DIP32.HEX`, `1/U42_P28F010@DIP32.BIN`; PLD `2/U43.GAL16V8B.JED` | 2× **P28F010**, U41+U42, 128 KB each (byte-interleaved: U41 = even bytes) | **NEC V810 (µPD70732)**, 16-bit bus | Servo board firmware ("Servo Board Monitor ©1995 Sony"); talks to the CPU board through a slot dual-port RAM | IDA DB `ROM_SERVO.bin.i64` exists; CPU identified, not written up |
+| **Servo-I/O board** | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` (64 KB each) | 2× **M27C512** | 32-bit RISC (likely **NEC µPD70732 / V810**) | Servo-I/O controller pair (no ASCII strings in the dumps) | Not started |
+| **PC-side tools (SRXWIN)** | `SRXWIN/*.EXE`, `SRXWIN/SRXMONIE.HLP` (19 files, MD5-verified) | — | x86 DOS / Win16 host PC | Sony host toolchain (1991–1996): `LUNNA`/`POINT`/`PLC` compilers, `ANNUL`/`DISPON`/`DPLC` decompilers, `SEND`/`RECALL`/`FILES`/`FDEL`/`HIST`/`MONIT`, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI `SRXMONIE`, installer | **Analysed** — structure, serial protocol, LUNA/PLC token tables, help text (see §3.2); replacement spec [`doc/SRXWIN-NG.md`](doc/SRXWIN-NG.md) |
 
 Component datasheets, manuals and design files (SRX operation manual, user training
 manual, SPD panel board, 486DX2/DX4, M27C256B, Altera MAX 7000, NEC µPD70732/V810, …)
-are listed in [`AGENTS.md`](AGENTS.md) §2.6.
+are listed in [`AGENTS.md`](AGENTS.md) §2.7. The operation manual is in [`books/`](books).
 
 ---
 
@@ -97,26 +97,62 @@ preliminary IDA databases.
 - Full disassembly/annotation in IDA Pro 9.0 (`ROM1-C.bin.i64`): **1298 functions**
   named by category, each with a call-popularity comment;
   [`function_popularity.md`](doc/function_popularity.md).
-- Platform established: 80486 real mode, runtime base `0xFFE00000 + file offset`,
-  `int 90h/91h` syscall ABI, `OS+/386 V2.0`.
+- Platform established: 80486 in flat 32-bit protected mode, runtime base
+  `0xFFE00000 + file offset`, RTOS **pSOS+/386 V2.0.I** (`int 90h` kernel calls,
+  `int 91h` I/O supervisor).
+- I/O architecture mapped (2026-09-26):
+  - 3× 8251A USARTs: TP, PC host, user RS-232C;
+  - 8259A pair, 8254;
+  - five slot dual-port-RAM windows for the servo and I/O boards, with the per-robot servo
+    cycle;
+  - RTC, EEPROM, PC-card window, and the pSOS task model.
+  Details: architecture report v2.
 - Subsystems mapped: kernel/OS, config validation, parameter DB, PLC engine,
   motion/point, teach-pendant UI, LUNA language, error reporting.
 - **Error system analysed**: full `E000…E401` message table; identified
   **`E401 = DSS off error`** (SMART) —
   [`SRX-611_error_401_DSS_report.md`](doc/SRX-611_error_401_DSS_report.md).
-- Architecture report with diagrams:
+- Architecture report v2 with diagrams, interface details and corrections to v1:
   [`SRX-611_firmware_architecture.md`](doc/SRX-611_firmware_architecture.md).
-- Partial C decompilation (Hex-Rays): `FW\SRX6-CPU\2\c_decomp\` (top-50 functions) and
-  `FW\SRX6-CPU\2\c_decomp_luna\` (LUNA subsystem, 43 functions +
+- Partial C decompilation (Hex-Rays): `FW/SRX6-CPU/2/c_decomp/` (top-50 functions) and
+  `FW/SRX6-CPU/2/c_decomp_luna/` (LUNA subsystem, 43 functions +
   [`LUNA_analysis.md`](doc/LUNA_analysis.md)).
 
-### 3.2 Planned / remaining
+### 3.2 PC-side tools (`SRXWIN`) — done so far
+
+- Inventory, provenance, toolchain (Borland C++ DOS suite + 1996 MSVC/MFC GUI) and MD5s
+  of all 19 files; how the GUI drives the DOS compilers via `.PIF`.
+- File-format map (`.LUN/.OBJ`, `.PON/.DAT/.CDT/.MDT`, `.PLC/.COD`, `.CTR`, `.KEE`, `.HST`, …)
+  and serial-line hypotheses (`9600,n,8,2`, DSR, ESC-code session start, checksum).
+- Cross-links to the firmware (LUNA/PLC keyword tables, PLC relays, error sets) —
+  [`SRXWIN_tools_report.md`](doc/SRXWIN_tools_report.md).
+- Spec for a modern cross-platform replacement, **SRXWIN-NG** (RU) —
+  [`SRXWIN-NG.md`](doc/SRXWIN-NG.md).
+- **Serial protocol** reversed from the DOS utilities: 9600 8N2 with DTR/RTS/DSR, ESC frames
+  `1B LEN CMD … SUM`, commands for download/upload/directory/delete/error history, and status
+  codes = E4000+s. Also a catalog of the ~110 SRX Platform monitoring commands —
+  [`SRXWIN_protocol.md`](doc/SRXWIN_protocol.md).
+- **LUNA symbol table** (230 keywords with token codes) recovered from `LUNNA.EXE` and
+  cross-checked with the `ANNUL.EXE` decompiler. The firmware table at `0xD99D2` turned out to
+  be the **PLC** mnemonic table — [`LUNA_token_map.md`](doc/LUNA_token_map.md).
+- **Help file** `SRXMONIE.HLP` fully extracted (333 topics: LUNA/PLC command reference, GUI,
+  error codes) — [`SRXMONIE_help.md`](doc/SRXMONIE_help.md). Extractors are in
+  [`tools/srxwin/`](tools/srxwin).
+- **Controller side of the protocol** located in `ROM1-C.bin`: the command-server task, the
+  frame reader (its status codes match the host tables) and a 172-entry handler table
+  (`SRXWIN_protocol.md` §9). A Ghidra project with the ROM at its link address `0xFFE00000`
+  can be recreated with [`tools/ghidra/`](tools/ghidra).
+
+### 3.3 Planned / remaining
 
 - Complete the CPU-firmware decompilation (several switch-heavy functions must be
   hand-reconstructed; see `AGENTS.md` §8).
 - Servo board: document `ROM_SERVO.bin` (monitor console, amplifier diagnostics).
 - Servo-I/O board: load `U7`/`U18` into IDA and identify the CPU.
-- PC tools (`SRXWIN`): document the host protocols, file formats and LUNA toolchain.
+- PC tools (`SRXWIN`): name the SRX Platform monitoring commands, decode the LUNA `.OBJ`
+  statement encoding, and confirm the protocol on hardware (SRXWIN-NG stage 1).
+- Name the 152 controller-side command handlers (the server task and table were found at
+  `0x50D00`/`0x51828`) and label `token_dispatch` with the LUNA token codes.
 - Cross-map the CPU↔TP↔servo↔servo-I/O communication protocols.
 
 ---
@@ -127,11 +163,15 @@ Detailed analysis notes are collected in [`doc/`](doc):
 
 | Document | Contents |
 |---|---|
-| [`SRX-611_firmware_architecture.md`](doc/SRX-611_firmware_architecture.md) | CPU-firmware architecture report (with mermaid diagrams) |
+| [`SRX-611_firmware_architecture.md`](doc/SRX-611_firmware_architecture.md) | CPU-firmware architecture report v2: pSOS+ kernel/BSP, drivers, IRQ/port/memory maps, tasks, TP / PC / RS-232C / servo-DPRAM interfaces (mermaid diagrams) |
 | [`SRX-611_error_401_DSS_report.md`](doc/SRX-611_error_401_DSS_report.md) | Error-reporting system + full `E000…E401` analysis; `E401 = DSS off` |
 | [`TP_firmware_structure.md`](doc/TP_firmware_structure.md) | Teach-pendant (HD64180) memory map, command dispatcher, `"SRX6"`↔`"TP4"` handshake |
-| [`LUNA_analysis.md`](doc/LUNA_analysis.md) | LUNA language subsystem analysis (companion to `FW\SRX6-CPU\2\c_decomp_luna\`) |
+| [`LUNA_analysis.md`](doc/LUNA_analysis.md) | LUNA language subsystem analysis (companion to `FW/SRX6-CPU/2/c_decomp_luna/`) |
 | [`function_popularity.md`](doc/function_popularity.md) | All 1298 CPU functions ranked by call popularity + comments |
 | [`SRXWIN_tools_report.md`](doc/SRXWIN_tools_report.md) | PC-side host toolchain (`SRXWIN`): LUNA/POINT/PLC compilers & decompilers, SEND/RECALL/FILES/FDEL/HIST/MONIT, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI (`SRXMONIE`), installer, formats, serial protocol |
+| [`SRXWIN-NG.md`](doc/SRXWIN-NG.md) | (RU) Spec for SRXWIN-NG, a modern replacement toolchain: architecture, requirements, stages, roles, hardware-safety rules |
+| [`SRXWIN_protocol.md`](doc/SRXWIN_protocol.md) | PC↔controller RS-232 protocol: line settings, framing/checksum, commands, status codes, SRX Platform command catalog |
+| [`LUNA_token_map.md`](doc/LUNA_token_map.md) | LUNA keyword/token table (from `LUNNA.EXE`), ANNUL cross-check, PLC mnemonic table |
+| [`SRXMONIE_help.md`](doc/SRXMONIE_help.md) | Full extracted text of `SRXMONIE.HLP` (LUNA/PLC reference, GUI, error codes) |
 
 The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md).
