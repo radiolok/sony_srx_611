@@ -1,0 +1,40 @@
+[project]
+name = "srxwin-ng"
+version = "0.1.0"
+description = "Modern replacement for the Sony SRXWIN toolchain (SRX-611 SCARA controller)"
+requires-python = ">=3.12"
+dependencies = ["pyserial>=3.5", "typer>=0.12"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff", "mypy"]
+
+[project.scripts]
+srx = "srx_cli.main:app"
+srx-fake = "srx_fake.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["dosbox: needs dosbox-x and the original SRXWIN EXEs (the oracle)"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+strict = true
+mypy_path = "src"
+packages = ["srx_link", "srx_formats", "srx_fake", "srx_dosbox", "srx_cli"]
+
+[[tool.mypy.overrides]]
+module = ["serial", "serial.*"]
+ignore_missing_imports = true

@@ -1,0 +1,13 @@
+
+**********************************************************************
+**  SRX PLC Compiler  Version 1.04  Copyright Sony Corp. 1996       **
+**                                           All Rights Reserved.   **
+**********************************************************************
+
+LINE 1  ERR No.3104   Invalid characters 'LD'.
+LINE 2  ERR No.3104   Invalid characters 'OUT'.
+
+------ 2 errors ------
+
+--- So, new file 'PERR1.COD' wasn't made. ---
+--- Please refer to file 'PERR1.ERR'. ---

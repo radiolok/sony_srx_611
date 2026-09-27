@@ -1,0 +1,5 @@
+INT    : CNT, VAL
+    CNT=1
+    VAL=CNT+2
+    DO	P0(1)
+    END

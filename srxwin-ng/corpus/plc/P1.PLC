@@ -1,0 +1,12 @@
+; relay blink test (srxwin-ng corpus)
+DEF  SW, R0000
+DEF  BLK, R0100
+JP(1) := CLK2
+  BLK = ~BLK
+JPE(1)
+R0001 = SW * BLK
+MOV( 0, K00C ) = FIRST
+INC( K00C ) := CLK1
+CMP( K00C, 10 ) = ALLON
+MOV( 0, K00C ) = EQU
+END

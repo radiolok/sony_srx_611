@@ -1,0 +1,9 @@
+LUNA 5.0  Version 1.05         		Copyright SONY Corp.  1983,1996
+					All Rights Reserved.
+
+Error LERR1.lun Line 1 : 2026  :You missed " :"(colon) mark
+Error LERR1.lun Line 1 : 2075  :CNT is a reserved word
+Error LERR1.lun Line 2 : 2014  :Undefined word A
+
+End of 1st pass
+Number of errors = 3
