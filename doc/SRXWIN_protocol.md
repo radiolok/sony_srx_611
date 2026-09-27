@@ -109,7 +109,8 @@ req : 1B 06 05 type kind SUM
 rep : 1B LEN xx 00 attr size32 name… 00 SUM      (entry present)
       1B LEN xx 0A …                              (slot empty)
 ```
-`attr` (+4) is copied but its meaning is unknown. The host marks "absent" with `FF`.
+`attr` (+4) is **the program type**: FILES.EXE prints it in the "TYPE NO." column
+(DOSBox-X oracle, §10). The host marks "absent" with `FF`.
 `size32` is at +5 and `name` at +9 (NUL-terminated). FDEL `0x3489`.
 A full directory scan (FDEL `0x33BB`, FILES) queries `(5F,0)`, then `(5E,0..3)`, then
 `(5C,t)` and `(5D,t)` for t = 0..15.
@@ -125,7 +126,8 @@ Per-type kinds (FDEL `0x3128`):
 * type 100: `(5F,100)` then `(5D,100)`.
 * anything else: `(5C,type)` then `(5D,type)`.
 
-Each delete is preceded by a `05` existence check.
+The `-A` path is preceded by a `05` existence check. **`-T<n>` sends the two `06` frames
+directly, with no `05` before them** (oracle, §10).
 
 ### 4.3 `01`/`02` — download a file to the controller (SEND)
 
@@ -135,8 +137,10 @@ data  : 1B n+9 02 type kind block16 last data[n] SUM        (n ≤ 128)
 reply : 1B LEN xx STATUS … SUM                              (after every frame)
 ```
 * `total32` = size1 + size2 (§4.4), and `name[8]` is copied from file-header bytes 4..11.
-  Byte 17 of the start frame is **never initialised** by SEND.EXE (stack garbage, but still
-  covered by the checksum). A re-implementation should send `00`.
+  Byte 17 of the start frame is **never initialised** by SEND.EXE, but still covered by the
+  checksum. Under DOSBox-X it always holds the **2nd character of the `-F` file-name
+  argument** (`-FT1` → `31`, `-FQWXZ` → `57`), i.e. stale stack data (§10). A
+  re-implementation should send `00`.
 * `block16` starts at 1 and increments per frame. `last` = 1 on the final frame (≤ 128 bytes
   remaining), otherwise 0.
 * The payload is the first `size1` bytes of the file (from its start, header included),
@@ -304,7 +308,8 @@ PC tools (it lives in the controller firmware).
 3. Name the ~40 firmware-only commands (§9.3). They are not used by any SRXWIN tool and are
    probably later additions (a newer host tool, or production/service use).
 4. Identify the peer on OS channel `0x10001` (§9.4).
-5. Record several real `.OBJ/.DAT/.CDT/.COD/.CTR` files to confirm the §4.4 header layout.
+5. Record several real `.OBJ/.DAT/.CDT/.COD/.CTR` files to confirm the §4.4 header layout
+   (the layout is confirmed for LUNNA and POINT output, §10).
 
 ---
 
@@ -397,3 +402,32 @@ That is the handshake the TP firmware implements (`doc/TP_firmware_structure.md`
 carries **no checksum**. All 38 command codes the CPU uses appear in the TP dispatcher. The command
 table (CPU builder, TP handler, call counts, meaning) is in
 [`SRX-611_firmware_architecture.md`](SRX-611_firmware_architecture.md) §8.1.
+
+---
+
+## 10. Oracle confirmation in DOSBox-X (2026-09-27)
+
+SRXWIN-NG (`srxwin-ng/`) runs the original DOS tools headless in DOSBox-X 2026.01.02, with
+COM1 as a `nullmodem` client of `srx-fake`, a Python fake controller. Test:
+`srxwin-ng/tests/test_dosbox_oracle.py`. This confirms the **host side** only; the controller
+behaviour is still modelled from §9.
+
+| Item | Result |
+|---|---|
+| Frame format, checksum, one request → one reply | confirmed with SEND, FILES, RECALL, HIST, FDEL |
+| Host raises DTR + RTS | confirmed: nullmodem control byte `03` right after the port opens |
+| FILES scan order (§4.1) | confirmed exactly: `(0,5F)`, `(0..3,5E)`, `(t,5C)`/`(t,5D)` for t = 0..15 |
+| `05` reply byte +4 | printed by FILES as **TYPE NO.** (was "attr, unknown") |
+| FILES "free" figure | computed on the host as 128 KB − Σ sizes (e.g. 149 bytes → "127.9 Kbytes free") |
+| SEND start frame byte 17 | 2nd character of the `-F` argument (stale stack), see §4.3 |
+| SEND with type 100 | kind forced to `5F`; type byte stays `0x64` |
+| SEND block size | whole file in one `02` frame when ≤ 128 bytes; `block` starts at 1 |
+| RECALL | asks for block 1 **twice** (header read, then the loop), for each kind; `-RA` = `5C` then `5D` |
+| FDEL `-T1` | `06 (1,5C)`, `06 (1,5D)`; no `05` pre-check |
+| HIST (no `-F`) | `14` for idx 0,1,… until status 15; does **not** send `15` |
+| HIST text | codes without an entry in its own table (e.g. E401) print with an empty text |
+| Prompts | SEND/RECALL/FDEL ask "Are you ready? (y/n)", RECALL also asks "Do you discompile this file?"; answers can come from redirected stdin |
+| `.OBJ`/`.DAT` header (§4.4) | confirmed on LUNNA/POINT output; files end with `0xED` (not a checksum) |
+
+`srx_link` (`Session.scan/send/recall/history/delete_program`) produces **byte-identical request
+streams** to the originals for all of the above. SEND needs `pad` = byte 17 to match.

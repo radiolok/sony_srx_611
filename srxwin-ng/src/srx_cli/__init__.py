@@ -1,0 +1,1 @@
+"""`srx` command line (CLI-*)."""

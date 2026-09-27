@@ -1,0 +1,2 @@
+# Corpus and goldens are byte-exact oracle data: never convert line endings.
+corpus/** -text

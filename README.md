@@ -189,7 +189,8 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`function_popularity.md`](doc/function_popularity.md) | All 1298 CPU functions ranked by call popularity + comments |
 | [`SRXWIN_tools_report.md`](doc/SRXWIN_tools_report.md) | PC-side host toolchain (`SRXWIN`): LUNA/POINT/PLC compilers & decompilers, SEND/RECALL/FILES/FDEL/HIST/MONIT, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI (`SRXMONIE`), installer, formats, serial protocol |
 | [`SRXWIN-NG.md`](doc/SRXWIN-NG.md) | (RU) Spec for SRXWIN-NG, a modern replacement toolchain: architecture, requirements, stages, roles, hardware-safety rules |
-| [`SRXWIN_protocol.md`](doc/SRXWIN_protocol.md) | PC↔controller RS-232 protocol: line settings, framing/checksum, commands, status codes, SRX Platform command catalog |
+| [`SRXWIN_protocol.md`](doc/SRXWIN_protocol.md) | PC↔controller RS-232 protocol: line settings, framing/checksum, commands, status codes, SRX Platform command catalog, DOSBox-X oracle confirmation (§10) |
+| [`srxwin-ng/README.md`](srxwin-ng/README.md) | SRXWIN-NG code: `srx` CLI, fake controller, DOSBox-X oracle/golden runner; specs in [`srxwin-ng/docs/spec/`](srxwin-ng/docs/spec) |
 | [`LUNA_token_map.md`](doc/LUNA_token_map.md) | LUNA keyword/token table (from `LUNNA.EXE`), ANNUL cross-check, PLC mnemonic table |
 | [`SRXMONIE_help.md`](doc/SRXMONIE_help.md) | Full extracted text of `SRXMONIE.HLP` (LUNA/PLC reference, GUI, error codes) |
 
@@ -203,4 +204,5 @@ the per-session work log is [`history.md`](history.md).
 | [`tools/cpu/rom1c_raminit.py`](tools/cpu/rom1c_raminit.py) | Rebuild the CPU firmware's initial RAM image; find a string's RAM address (`--find`) and pointer tables (`--ptr`) |
 | [`tools/ghidra/`](tools/ghidra) | Headless Ghidra: import `ROM1-C.bin` at `0xFFE00000`, seed functions, label the host protocol, print decompiled C (heavy on a small machine) |
 | [`tools/ida/rebase_ffe00000.py`](tools/ida/rebase_ffe00000.py) | IDAPython: rebase `ROM1-C.bin.i64` to `0xFFE00000` so the jump tables resolve (run on a copy) |
+| [`srxwin-ng/`](srxwin-ng) | SRXWIN-NG (Python): `srx` CLI (files/send/recall/hist/backup/delete/compile), `srx-fake` controller emulator, DOSBox-X harness |
 | [`tools/srxwin/`](tools/srxwin) | SRXWIN helpers: WinHelp extractor, LUNA symbol-table dumper, SRXMONIE command scanner |

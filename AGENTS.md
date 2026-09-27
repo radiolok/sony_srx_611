@@ -166,8 +166,26 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
   - No protocol fuzzing against real hardware.
   - Writing `.CTR` and `.KEE` is blocked.
   - Take a full backup before the first connection.
-- Open questions are in the spec's §8.3. No SRXWIN-NG code exists in this repository
-  yet.
+- Open questions are in the spec's §8.3.
+- **Code: `srxwin-ng/`** (started 2026-09-27; see `srxwin-ng/README.md`). It is a Python
+  3.12+ package in a venv at `srxwin-ng/.venv`, tested with
+  `.venv/bin/python -m pytest`, and needs `dosbox-x` (apt).
+  - `srx_link` (framing, `Session` with READ/WRITE/MOTION guard + JSONL journal),
+    `srx_fake` (fake controller over TCP in DOSBox-X nullmodem format), `srx_dosbox`
+    (headless runner + golden runner), `srx_cli` (`srx` command), `srx_formats` (header).
+  - Stage 0 and the stage-1 gate are met **without hardware**: the original
+    SEND/FILES/RECALL/HIST/FDEL work against `srx-fake`, and `srx_link` sends
+    byte-identical frames (`tests/test_dosbox_oracle.py`).
+  - CI: `.github/workflows/srxwin-ng.yml` (lint; Linux tests with the DOSBox-X oracle;
+    Windows tests without it). It triggers on changes to `srxwin-ng/**` or `SRXWIN/**`.
+  - Normative specs are in `srxwin-ng/docs/spec/` (`PROTOCOL.md`, `FORMATS.md`), with
+    status tags [H]/[E]/[C]. Nothing is [C] yet.
+- **DOSBox-X oracle gotchas:**
+  - LUNNA and POINT write to video RAM, so the runner dumps B800 with a tiny
+    `SCRDUMP.COM`.
+  - Answer `(y/n)` prompts with `< _YES.TXT`.
+  - Kill DOSBox-X with SIGKILL (SIGTERM opens a "quit?" prompt).
+  - A serial tool with no peer hangs forever.
 
 ### 2.7 Support documents and files
 
@@ -180,6 +198,7 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
 | `tools/ghidra/` | Ghidra headless setup: `import_rom1c.sh` (project with ROM1-C.bin at `0xFFE00000`), `SeedSrxFunctions.java` (pre-analysis seeding), `LabelSrxProtocol.java` (protocol labels), `DecompileByName.java` (print C). See §7 |
 | `tools/ida/` | `rebase_ffe00000.py`: IDAPython script to rebase `ROM1-C.bin.i64` to `0xFFE00000` (run on a copy, on the workstation) |
 | `tools/cpu/` | `rom1c_raminit.py`: rebuilds the RAM image from ROM1-C.bin's init stream; finds strings' RAM addresses and pointer tables (§8.1). |
+| `srxwin-ng/` | SRXWIN-NG code (§2.6): `srx_link`, `srx_fake`, `srx_dosbox`, `srx_cli`, corpus + goldens, specs in `docs/spec/`. |
 | `tools/srxwin/` | Pure-Python helpers: `hlp_extract.py` (WinHelp 3.x → JSON/Markdown), `lunna_symtab.py` (LUNA symbol table), `srxmonie_cmds.py` (protocol frame-builder scan; needs `capstone`). |
 | `img/main.jpg` | Photo of the robot (used in `README.md`). |
 | `README.md` | Robot and controller specifications, firmware inventory, research status, doc index. |
@@ -223,7 +242,7 @@ these:
 | `function_popularity.md` | All 1298 CPU functions ranked by call popularity, with comments |
 | `SRXWIN_tools_report.md` | PC host toolchain: inventory, architecture, file formats, firmware cross-links, RE leads, MD5s |
 | `SRXWIN-NG.md` | (RU) Spec for the modern replacement toolchain: architecture, requirements, stages, roles, hardware-safety rules |
-| `SRXWIN_protocol.md` | PC↔controller RS-232 protocol: line settings, frame/checksum, status codes (E4000+s), DOS-tool commands `01 02 04 05 06 14 15`, kind/type addressing, SRXMONIE command catalog, MONIT console |
+| `SRXWIN_protocol.md` | PC↔controller RS-232 protocol: line settings, frame/checksum, status codes (E4000+s), DOS-tool commands `01 02 04 05 06 14 15`, kind/type addressing, SRXMONIE command catalog, MONIT console, §10 DOSBox-X oracle confirmation |
 | `LUNA_token_map.md` | LUNA symbol table from LUNNA.EXE (230 keywords, token codes, groups), ANNUL cross-check, PLC mnemonic table (`0xD99D2` correction) |
 | `SRXMONIE_help.md` | Full text of `SRXMONIE.HLP` (generated): LUNA/PLC command reference, GUI, error list |
 
@@ -544,6 +563,13 @@ Lists"), and the codes are `E000…E400` only. E401 appears in neither the manua
 - Boot EPROM: write up the analysis (only IDA DBs exist).
 - Servo board: document `ROM_SERVO.bin` (V810, code at `0x00100000`; monitor console, amplifier diagnostics, DPRAM side of the slot protocol).
 - Servo-I/O board: load `U7`/`U18` into IDA and identify the CPU.
+- SRXWIN-NG (`srxwin-ng/`; stage 0 + stage-1 gate done 2026-09-27 against the fake):
+  - Stage 3: decode `.DAT/.COD/.OBJ` from the golden corpus, then build the
+    DISPON/DPLC/ANNUL equivalents. Grow the corpus to one file per keyword.
+  - Stage 5: extend `srx_fake` with the SRXMONIE monitoring commands (firmware
+    `host_cmd_table` `0x51828`), then run SRXMONIE in Win 3.11/86Box against it.
+  - Hardware: record real sessions and confirm the [H] items in
+    `srxwin-ng/docs/spec/PROTOCOL.md`. Obey spec §8.
 - SRXWIN (done 2026-09-26: help extraction, LUNA symbol table, DOS-tool protocol):
   - Name the ~110 SRXMONIE monitoring commands (NE relocation → caller → menu/window).
   - Decode the `.OBJ` statement encoding (ANNUL statement decoder, or compile test

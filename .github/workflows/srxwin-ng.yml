@@ -1,0 +1,68 @@
+name: srxwin-ng
+
+on:
+  push:
+    paths: ["srxwin-ng/**", "SRXWIN/**", ".github/workflows/srxwin-ng.yml"]
+  pull_request:
+    paths: ["srxwin-ng/**", "SRXWIN/**", ".github/workflows/srxwin-ng.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: srxwin-ng
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: srxwin-ng/pyproject.toml
+      - run: pip install -e '.[dev]'
+      - run: ruff check src tests tools
+      - run: mypy
+
+  # Full suite incl. the DOSBox-X oracle (original SRXWIN tools vs srx-fake, goldens).
+  test-linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: srxwin-ng/pyproject.toml
+      - name: Install DOSBox-X
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends dosbox-x
+      - run: dpkg-query -W dosbox-x
+      - run: pip install -e '.[dev]'
+      - name: pytest
+        run: pytest -ra --junitxml=junit.xml
+      - name: Fail if the oracle was skipped
+        run: |
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          skipped = [c.get("name") for c in ET.parse("junit.xml").iter("testcase")
+                     if c.find("skipped") is not None and "oracle" in (c.get("classname") or "")]
+          assert not skipped, f"oracle tests skipped: {skipped}"
+          EOF
+
+  # Library/CLI must work on Windows too (spec §1). DOSBox tests auto-skip here.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: srxwin-ng/pyproject.toml
+      - run: pip install -e '.[dev]'
+      - run: pytest -ra
