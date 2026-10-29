@@ -31,7 +31,8 @@ This project reverse-engineers the **Sony SRX-611 SCARA robot controller** and i
 surrounding boards, mainly by static analysis in IDA. The main focus is the
 **CPU-board firmware**: its OS, the robot application, the **LUNA** robot-programming
 language, and annotation of the IDA database. The other boards' firmware (servo,
-servo-I/O, teach pendant) and the PC-side host tooling (SRXWIN) are summarised in §2.
+Control board DSPs, teach pendant) and the PC-side host tooling (SRXWIN) are summarised in §2.
+The board-level structure of the whole controller is in `doc/hardware_overview.md`.
 That lets an agent place any binary it is asked about before reading the detailed
 CPU-board notes in §3–§11.
 
@@ -47,7 +48,7 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
 | Teach pendant (TP) EPROM | `FW/TP/IC6_M27C256B@DIP28.BIN` | M27C256B, 32 KB | Hitachi **HD64180/Z180** | Thin terminal: keypad, 20-char display, serial command interpreter | **Analysed**: DB `IC6_….i64`, report `doc/TP_firmware_structure.md` (§2.2) |
 | Servo board `ROM_SERVO.bin` | `FW/SRX6-SERVO/` | 2× P28F010 flash (U41+U42), 128 KB each | 16-bit bus (byte-interleaved) | Servo amplifier/monitor firmware. `ROM_SERVO.bin` (256 KB) = U41 even bytes + U42 odd bytes | IDA DB `ROM_SERVO.bin.i64` exists; no write-up yet |
 | Servo-board PLD | `FW/SRX6-SERVO/2/U43.GAL16V8B.JED` | GAL16V8B | — | Glue logic / address decode JEDEC | Raw dump only |
-| Servo-I/O board EPROMs | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` | 2× M27C512, 64 KB each | 32-bit RISC (likely NEC µPD70732 / V810) | Servo-I/O controller pair (128 KB total). **No ASCII strings** in the raw dumps | Not analysed |
+| **Control board** DSP EPROMs (folder still named `SERVO_IO`) | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` | 2× 27C512 "C6A06 V2.07", 64 KB each, **byte-identical** | **2× ADSP-2115** (boot-EPROM format) | Current loop + 3-phase PWM, 2 motors per DSP; host mailbox to SERVO | **First pass** (2026-10-29): `doc/control_board_firmware.md`, listing `FW/SERVO_IO/1/U7_dis.asm`, tool `tools/adsp/` |
 | PC-side tools (SRXWIN) | `SRXWIN/` (19 files, MD5-verified against the tools report) | — (x86 DOS / Win16) | host PC | Sony host toolchain: LUNA/POINT/PLC compilers and decompilers, serial utilities, and the "SRX Platform" MFC GUI | **Analysed**: structure (`doc/SRXWIN_tools_report.md`), serial protocol (`doc/SRXWIN_protocol.md`), LUNA/PLC tokens (`doc/LUNA_token_map.md`), help text (`doc/SRXMONIE_help.md`). Replacement spec: `doc/SRXWIN-NG.md` |
 
 ### 2.1 CPU board (SRX6-CPU) — main controller
@@ -87,17 +88,30 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
 - It talks to the CPU board through a **dual-port-RAM slot window** (see
   `doc/SRX-611_firmware_architecture.md` §8.4). The monitor has `MODE (L/R)` and `RMTCMD`,
   and error texts `host CPU communication error` / `host CPU watch dog timer error`.
-- The owner reports **four physically separate servo controllers** (one per axis). The CPU
-  firmware supports 5 slots; the axis → (slot, sub-axis) map is the SLOT/AXIS setting.
+- **Corrected 2026-10-29:** the unit has **one** SRX6-SERVO board for all four axes (owner,
+  from the card cage). The "four servo controllers" are the four **motor driver** modules;
+  they and **one** Control board (2× ADSP-2115, §2.4) sit on a separate drive backplane.
+  The CPU firmware supports 5 slots; the axis → (slot, sub-axis) map is the SLOT/AXIS
+  setting, so here all four axes must map to sub-axes of one servo slot.
+- Board parts (photo): 2× MB8421 dual-port RAM (the slot DPRAM), 2× Sony CXD8477Q,
+  PLDs S6S-*, DB9 monitor port, TX3-50P front connector (probably the cable to the Control
+  board). `AMP ERROR(axis 1/2)` probably means DSP channel 1/2 of the Control board.
 
-### 2.4 Servo-I/O board (SERVO_IO)
+### 2.4 Control board — 2× ADSP-2115 (dumps in `FW/SERVO_IO/`)
 
-- Two 64 KB `M27C512` EPROMs (`U7`, `U18`) give 128 KB of program space. The raw dumps
-  contain **no printable ASCII strings** (code and numeric data only), so no banner has
-  been recovered.
-- The CPU is unconfirmed; V810 is a guess (the servo board, §2.3, is a confirmed V810). The
-  images have not been loaded into IDA yet. The CPU board sees I/O boards as **slot kind 3**
-  (architecture report §8.4); whether this board is one of them is unknown.
+- **Identified 2026-10-29** (it used to be called "Servo-I/O board, V810 guessed"). The
+  `U7`/`U18` dumps are the two EPROMs "C6A06 V2.07" of the Control board 1-659-417-12. They
+  are **byte-identical** (MD5 `b8a7a0abc2ddea7cb1dfd694385a06ed`); each feeds one
+  **ADSP-2115**. Folder name kept on purpose (owner's request).
+- Format: ADSP-2101/2115 byte-wide boot pages every 8 KB; 3 bytes per 24-bit word + pad
+  byte; byte 3 = page length ((n+1)·8 words). Pages: 0 = loader/init (192 words), 1 = run
+  time (1024 words), 2 = ADC measurement mode (72 words).
+- Role: per DSP, current loop + 3-phase PWM for **two motors** (AD7874 ADC at DM `$3400`,
+  CXD8501R with host mailbox `$3000–$301F`, PWM period `$3033`, 6 compares `$3037–$303C`,
+  driver module IDs `$3030`). Host commands `$Cxxx` peek / `$Dxxx` poke / `$8001` enable /
+  `$80x0`,`$9002` modes. No encoder handling seen.
+- Tool: `tools/adsp/adsp21xx.py` (pages / dis / xref). Report:
+  `doc/control_board_firmware.md`. Generated: `FW/SERVO_IO/1/U7_dis.asm`, `U7_xref.md`.
 
 ### 2.5 PC-side tools (SRXWIN) — see `doc/SRXWIN_tools_report.md`
 
@@ -226,6 +240,8 @@ these:
 | `SRXWIN_protocol.md` | PC↔controller RS-232 protocol: line settings, frame/checksum, status codes (E4000+s), DOS-tool commands `01 02 04 05 06 14 15`, kind/type addressing, SRXMONIE command catalog, MONIT console |
 | `LUNA_token_map.md` | LUNA symbol table from LUNNA.EXE (230 keywords, token codes, groups), ANNUL cross-check, PLC mnemonic table (`0xD99D2` correction) |
 | `SRXMONIE_help.md` | Full text of `SRXMONIE.HLP` (generated): LUNA/PLC command reference, GUI, error list |
+| `hardware_overview.md` | Controller block diagram and per-board sections (photo + diagram + parts): CPU, SIO2 mezzanine, Mother board, SERVO, I/O, Control board, drivers, SPD panel; open hardware questions |
+| `control_board_firmware.md` | Control board ADSP-2115 firmware, first pass: boot pages, set-up registers, DM map (mailbox, PWM, ADC, IDs), interrupts, host commands, page-2 ADC mode |
 
 ## 4. Target platform (CPU board, facts)
 
@@ -543,11 +559,15 @@ Lists"), and the codes are `E000…E400` only. E401 appears in neither the manua
   - Use the LUNA token table (`doc/LUNA_token_map.md`) to label `token_dispatch` cases.
 - Boot EPROM: write up the analysis (only IDA DBs exist).
 - Servo board: document `ROM_SERVO.bin` (V810, code at `0x00100000`; monitor console, amplifier diagnostics, DPRAM side of the slot protocol).
-- Servo-I/O board: load `U7`/`U18` into IDA and identify the CPU.
+- ~~Servo-I/O board: identify the CPU~~ (done 2026-10-29: Control board, 2× ADSP-2115).
+  Next: mark PM data areas in `tools/adsp/`, follow the IRQ1 current loop, and match the
+  mailbox commands with the SERVO side in `ROM_SERVO.bin`.
+- Hardware (see `doc/hardware_overview.md` §10): where the SERVO 50-pin cable goes; whether
+  encoder lines stop at the Control board; slot ↔ DPRAM window map.
 - SRXWIN (done 2026-09-26: help extraction, LUNA symbol table, DOS-tool protocol):
   - Name the ~110 SRXMONIE monitoring commands (NE relocation → caller → menu/window).
   - Decode the `.OBJ` statement encoding (ANNUL statement decoder, or compile test
     programs with the original LUNNA under DOSBox-X and diff).
   - Confirm the protocol on hardware with a serial sniffer (SRXWIN-NG stage 1; obey the
     spec's §8 safety rules).
-- Cross-map the CPU↔TP↔servo↔servo-I/O communication protocols (CPU side of TP, PC, user RS-232C and servo DPRAM done in the architecture report v2; TP handlers marked [H] and the servo board side remain).
+- Cross-map the CPU↔TP↔servo↔Control-board communication protocols (CPU side of TP, PC, user RS-232C and servo DPRAM done in the architecture report v2; TP handlers marked [H] and the servo board side remain).

@@ -20,8 +20,10 @@ needs no home return in normal use.
 
 - **Kinematics:** SCARA, **4 axes** (X, Y, Z, R).
 - **Drive:** all-axis AC servo, **software servo** (manual wording). The unit studied here
-  has **four physically separate servo controller boards**, one per axis. Each has a
-  NEC V810 CPU and is linked to the main CPU through dual-port RAM (see §3.1).
+  has **one SRX6-SERVO board** (NEC V810, linked to the main CPU through slot dual-port
+  RAM, see §3.1) for all four axes. It drives **one Control board** with two ADSP-2115
+  DSPs (current loop + PWM, two motors each), which feeds **four motor driver** modules.
+  Board-level structure: [`doc/hardware_overview.md`](doc/hardware_overview.md).
 - **Position detection:** absolute method, battery back-up.
 - **Programming language:** **LUNA** (Ver. 5.0), compiled on DOS (≥ 5.0), debugged from
   Windows with the SRX Platform kit; teaching via the optional teaching pendant.
@@ -80,7 +82,7 @@ All paths are relative to the project root.
 | **CPU boot EPROM** | `FW/SRX6-CPU/2/U23_M27C256B@DIP28.BIN`, `FW/SRX6-CPU/1/U26_….BIN`, `FW/SRX6-CPU/M27C256B@DIP28.BIN` (all identical) | **M27C256B**, 32 KB | Intel 80486 | Boot/monitor EPROM, separate from the main image | Preliminary — IDA DBs (`80486r`) exist |
 | **Teach pendant (TP)** | `FW/TP/IC6_M27C256B@DIP28.BIN` (32 KB) | **M27C256B** | **Hitachi HD64180/Z180** | Thin terminal: keypad, 20-char display, serial command interpreter | **Analysed** — see [`doc/TP_firmware_structure.md`](doc/TP_firmware_structure.md) |
 | **Servo board** | `FW/SRX6-SERVO/ROM_SERVO.bin` (256 KB); sources `1/U41_P28F010@DIP32.HEX`, `1/U42_P28F010@DIP32.BIN`; PLD `2/U43.GAL16V8B.JED` | 2× **P28F010**, U41+U42, 128 KB each (byte-interleaved: U41 = even bytes) | **NEC V810 (µPD70732)**, 16-bit bus | Servo board firmware ("Servo Board Monitor ©1995 Sony"); talks to the CPU board through a slot dual-port RAM | IDA DB `ROM_SERVO.bin.i64` exists; CPU identified, not written up |
-| **Servo-I/O board** | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` (64 KB each) | 2× **M27C512** | unconfirmed (V810 guessed) | Servo-I/O controller pair (no ASCII strings in the dumps) | Not started |
+| **Control board** (folder still `SERVO_IO`) | `FW/SERVO_IO/1/U7_M27C512@DIP28.BIN`, `FW/SERVO_IO/1/U18_M27C512@DIP28.BIN` (64 KB each, byte-identical) | 2× **27C512** "C6A06 V2.07" | **2× ADSP-2115** (boot-EPROM format) | DSP current loop + 3-phase PWM, two motors per DSP; host mailbox to the SERVO board | **First pass** — [`doc/control_board_firmware.md`](doc/control_board_firmware.md), listing `FW/SERVO_IO/1/U7_dis.asm` |
 | **PC-side tools (SRXWIN)** | `SRXWIN/*.EXE`, `SRXWIN/SRXMONIE.HLP` (19 files, MD5-verified) | — | x86 DOS / Win16 host PC | Sony host toolchain (1991–1996): `LUNNA`/`POINT`/`PLC` compilers, `ANNUL`/`DISPON`/`DPLC` decompilers, `SEND`/`RECALL`/`FILES`/`FDEL`/`HIST`/`MONIT`, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI `SRXMONIE`, installer | **Analysed** — structure, serial protocol, LUNA/PLC token tables, help text (see §3.2); replacement spec [`doc/SRXWIN-NG.md`](doc/SRXWIN-NG.md) |
 
 Component datasheets, manuals and design files (SRX operation manual, user training
@@ -160,19 +162,21 @@ preliminary IDA databases.
 
 - Complete the CPU-firmware decompilation (several switch-heavy functions must be
   hand-reconstructed; see `AGENTS.md` §8). Apply the v2 function names to the IDA DB.
-- Confirm on the real unit which slots hold the four servo controllers, and what is in
-  slot 5.
+- Confirm which Mother-board slot maps to which DPRAM window (the unit has CPU + SIO2,
+  2× I/O and one SERVO; two slots empty) — [`doc/hardware_overview.md`](doc/hardware_overview.md) §10.
 - Servo board: document `ROM_SERVO.bin` (V810, code at `0x00100000`): monitor console,
   amplifier diagnostics, and its side of the dual-port-RAM protocol (meaning of the
   per-axis fields).
-- Servo-I/O board: load `U7`/`U18` into IDA and identify the CPU.
+- Control board (2× ADSP-2115): mark the PM data tables, follow the IRQ1 current loop,
+  match the mailbox commands with the SERVO side of `ROM_SERVO.bin`.
 - PC tools (`SRXWIN`): name the SRX Platform monitoring commands, decode the LUNA `.OBJ`
   statement encoding, and confirm the protocol on hardware (SRXWIN-NG stage 1).
 - Name the 152 controller-side command handlers (the server task and table were found at
   `0x50D00`/`0x51828`) and label `token_dispatch` with the LUNA token codes.
 - Teach pendant: confirm the TP commands still marked as hypotheses (architecture report
   §8.1).
-- Servo-I/O board: find out how it connects to the CPU board (slot I/O board or not).
+- Hardware: trace the SERVO 50-pin cable and the encoder lines (do they stop at the
+  Control board or go on to SERVO?).
 
 ---
 
@@ -192,6 +196,8 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`SRXWIN_protocol.md`](doc/SRXWIN_protocol.md) | PC↔controller RS-232 protocol: line settings, framing/checksum, commands, status codes, SRX Platform command catalog |
 | [`LUNA_token_map.md`](doc/LUNA_token_map.md) | LUNA keyword/token table (from `LUNNA.EXE`), ANNUL cross-check, PLC mnemonic table |
 | [`SRXMONIE_help.md`](doc/SRXMONIE_help.md) | Full extracted text of `SRXMONIE.HLP` (LUNA/PLC reference, GUI, error codes) |
+| [`hardware_overview.md`](doc/hardware_overview.md) | Controller block diagram and per-board sections with photos: CPU, SIO2 mezzanine, Mother board, SERVO, I/O, Control board, drivers, SPD panel |
+| [`control_board_firmware.md`](doc/control_board_firmware.md) | Control board (2× ADSP-2115) firmware, first pass: boot pages, DM map, interrupts, host mailbox commands, ADC mode |
 
 The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md);
 the per-session work log is [`history.md`](history.md).
@@ -204,3 +210,4 @@ the per-session work log is [`history.md`](history.md).
 | [`tools/ghidra/`](tools/ghidra) | Headless Ghidra: import `ROM1-C.bin` at `0xFFE00000`, seed functions, label the host protocol, print decompiled C (heavy on a small machine) |
 | [`tools/ida/rebase_ffe00000.py`](tools/ida/rebase_ffe00000.py) | IDAPython: rebase `ROM1-C.bin.i64` to `0xFFE00000` so the jump tables resolve (run on a copy) |
 | [`tools/srxwin/`](tools/srxwin) | SRXWIN helpers: WinHelp extractor, LUNA symbol-table dumper, SRXMONIE command scanner |
+| [`tools/adsp/adsp21xx.py`](tools/adsp) | ADSP-21xx boot-EPROM unpacker, disassembler (MAME port) and DM cross-reference — Control board DSPs |
