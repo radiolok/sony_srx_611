@@ -250,6 +250,7 @@ these:
 | `SRXMONIE_help.md` | Full text of `SRXMONIE.HLP` (generated): LUNA/PLC command reference, GUI, error list |
 | `hardware_overview.md` | Controller block diagram and per-board sections (photo + diagram + parts): CPU, SIO2 mezzanine, Mother board, SERVO, I/O, Control board, drivers, SPD panel; open hardware questions |
 | `control_board_firmware.md` | Control board ADSP-2115 firmware, first pass: boot pages, set-up registers, DM map (mailbox, PWM, ADC, IDs), interrupts, host commands, page-2 ADC mode |
+| `emulator_plan.md` | Whole-system emulator plan: MAME driver (i486, V810, 2× ADSP-2115, opt. Z180), board models, missing data + stub method, milestones, data to collect, first coding tasks |
 | `servo_dsp_link.md` | SERVO (V810) side of the DSP mailbox: V810 run-time layout, DSP windows `0x400000/0x400080`, pointer table, handshake, command list, axis↔DSP map, encoder conclusions |
 
 ## 4. Target platform (CPU board, facts)
