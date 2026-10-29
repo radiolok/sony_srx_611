@@ -235,7 +235,8 @@ Per DSP (`doc/control_board_firmware.md`):
 | `$3021` | control/status: store writes; reads return the stored value OR status bits (`$0080`, `$0380`, `$E000`) from the plant/safety model |
 | `$3022`, `$3023` | fault/enable bits: store; drive the plant enables |
 | `$3025` | write `$0080` → start an ADC conversion → AD7874 INT after the conversion time → DSP IRQ1 |
-| `$3026–$302B`, `$3029`, `$302D` | per-motor counters/latches: return encoder counts from the plant (read twice → must be stable between reads) |
+| `$3026/$3027`, `$302A/$302B` | **24-bit position counters** motor A / B (low 16 bits; byte = bits 23..16). Written by the DSP after an ABS read and by the SERVO (preset); count A/B pulses from the plant |
+| `$3029`, `$302D` | per-motor latch read twice for a stable value — meaning still open |
 | `$302F`, `$303F` | status: store; `$303F` bits 2–5 from plant/safety |
 | `$3030`, `$3031` | driver module ID (4 bits per motor: `8`, `9`, `A`, `C` known) + ready bits `$1010` (active low) |
 | `$3033–$303C` | PWM period / set-up / six compare registers → plant model |
@@ -260,10 +261,11 @@ A simple model per axis, enough to keep the firmware happy:
 - encoder: incremental count → `$3029/$302D`-type registers; absolute position + status
   (battery, shock, UVW) → SPORT0 frames when the DSP clocks them.
 
-The SPORT0 encoder frame format is not known yet. Derive it from the DSP state machine
-(`$0389`, `$039A`, `$03EA`) — that is the "next step" in `doc/servo_dsp_link.md` §7. Until
-then, answer with frames that leave the DSP state machine in its "done" state and log
-everything.
+The SPORT0 frame format is decoded in `doc/abs_encoder_protocol.md` (§8 there is the
+recipe for the model): DR0 sampled at SCLK, one bit per 16 samples, two 24-bit blocks with
+CRC-5 x⁵+x²+1, block 1 = status + position bits 23..16, block 2 = position bits 15..0. The
+motor is selected by the DSP's `$3200` bit 0. Line coding and status bits are still to be
+confirmed on hardware.
 
 ### 5.7 Safety chain (SPD panel)
 

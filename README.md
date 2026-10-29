@@ -199,6 +199,7 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`SRXMONIE_help.md`](doc/SRXMONIE_help.md) | Full extracted text of `SRXMONIE.HLP` (LUNA/PLC reference, GUI, error codes) |
 | [`hardware_overview.md`](doc/hardware_overview.md) | Controller block diagram and per-board sections with photos: CPU, SIO2 mezzanine, Mother board, SERVO, I/O, Control board, drivers, SPD panel |
 | [`control_board_firmware.md`](doc/control_board_firmware.md) | Control board (2× ADSP-2115) firmware, first pass: boot pages, DM map, interrupts, host mailbox commands, ADC mode |
+| [`abs_encoder_protocol.md`](doc/abs_encoder_protocol.md) | Serial absolute-encoder link: DSP SPORT0 state machine, frame format with CRC-5, where the 24-bit position and status land, SERVO side |
 | [`emulator_plan.md`](doc/emulator_plan.md) | Plan for a whole-system emulator (MAME driver running all original firmware): models per board, missing data and stubs, milestones |
 | [`servo_dsp_link.md`](doc/servo_dsp_link.md) | SERVO board (V810) side of the DSP mailbox: memory layout, DSP windows, handshake, commands (connect, servo on/off, serial ABS read, monitor pokes), axis map |
 

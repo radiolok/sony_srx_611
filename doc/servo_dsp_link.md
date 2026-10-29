@@ -45,10 +45,10 @@ The firmware keeps the window addresses in a table at `0x23B44` (`gp−0x7FA8`).
 | `−0x7F98` / `−0x7F94` | `0x400042` / `0x4000C2` | `$3021` | ASIC control/status |
 | `−0x7F90` / `−0x7F8C` | `0x400044` / `0x4000C4` | `$3022` | ASIC fault/enable |
 | `−0x7F88` / `−0x7F84` | `0x40007E` / `0x4000FE` | `$303F` | ASIC status (bits 2–3 `0x000C` set by the V810) |
-| `−0x7F80`, `−0x7F7C` | `0x400012`, `0x400016` | `$3009`, `$300B` | DSP 1 data words (ABS result? [H]) |
+| `−0x7F80`, `−0x7F7C` | `0x400012`, `0x400016` | `$3009`, `$300B` | DSP 1 **inputs written by SERVO** (per motor, from axis structures; meaning open) — not the ABS result |
 | `−0x7F78`, `−0x7F74` | `0x400092`, `0x400096` | `$3009`, `$300B` | same, DSP 2 |
-| `−0x7F70…−0x7F64` | `0x40004C/4E/54/56` | `$3026/27/2A/2B` | DSP 1 per-motor ASIC registers |
-| `−0x7F60…−0x7F54` | `0x4000CC/CE/D4/D6` | `$3026/27/2A/2B` | DSP 2 per-motor ASIC registers |
+| `−0x7F70…−0x7F64` | `0x40004C/4E/54/56` | `$3026/27/2A/2B` | DSP 1 **24-bit position counters**: motor A = `$3027` (byte, bits 23..16) : `$3026`; motor B = `$302B` : `$302A` (`doc/abs_encoder_protocol.md`) |
+| `−0x7F60…−0x7F54` | `0x4000CC/CE/D4/D6` | `$3026/27/2A/2B` | DSP 2 position counters (axes 3, 4) |
 | `−0x7F50` | `0x40004A` | `$3025` | DSP 1 ASIC control |
 
 Other direct accesses: `$3001` (data word, ×10 sites), `$3003`, `$3004–$3007` (monitor
@@ -100,24 +100,22 @@ switch tables (`sub_3080`, `sub_0BB4`, `sub_0E3C`) agree: [C]
 
 ## 6. What this says about the encoders
 
-- The SERVO board never reads encoder hardware directly in what was examined. It reads
-  per-motor words from the DSP windows (`$3029`/`$302D`, `$3026/27/2A/2B`, `$3009/$300B`).
-  [C]
-- It asks the DSP to read the **serial absolute encoder** (`0x8082`/`0x8084` → SPORT0). The
-  error texts confirm an absolute encoder with battery and UVW commutation signals
-  (`shock error of the absolute encoder`, `low battery error of the absolute encoder`,
-  `encoder UVW-phase signal error`). [I]
-- So the encoder lines most likely **end at the Control board**: serial ABS on the DSP's
-  SPORT0, and incremental counting probably inside the CXD8501R (`$3029`/`$302D`, read
-  twice for a stable value). This corrects the "pass-through" guess in the first DSP
-  report. A continuity test of the feedback connector would settle it. [H]
+Worked out in detail in `doc/abs_encoder_protocol.md`. In short: [C][I]
+
+- The encoder lines **end at the Control board**. The serial absolute encoder is read by the
+  DSP on SPORT0 (receive-only, 16× oversampled; a motor A/B multiplexer selected by `$3200`
+  bit 0). Frame = two 24-bit blocks with CRC-5 (x⁵+x²+1).
+- The decoded 24-bit position is loaded into the CXD8501R **24-bit position counters**
+  (`$3026/$3027`, `$302A/$302B`), which then count incrementally. The SERVO board reads them
+  as signed 24-bit positions (`sub_0A08`) and can preset them.
+- Status byte per motor → `$3003`, read by the SERVO at `0x1D60`.
 
 ## 7. Next steps
 
 1. Name the V810 functions around the mailbox (`0x0948`, `0x1110…0x1600`, `0x3080`, `0x0BB4`)
    via the monitor command table near string `0x23DE8` (`CONNECT`, `MODE`, `RMTCMD`,
    `MODEL`, `ABSCOPY`).
-2. DSP side: decode the SPORT0 state machine (`$0389`, `$039A`, `$03EA`) as the serial
-   ABS frame, and find where the result lands (`$3009`/`$300B`?).
+2. ~~Decode the SPORT0 serial-ABS state machine~~ — done: `doc/abs_encoder_protocol.md`
+   (result → counters `$3026/27`, `$302A/2B`, status → `$3003`).
 3. Map the SERVO side of the CPU DPRAM (`0x200000…`) to the per-axis fields that the CPU
    firmware uses (architecture report §8.4).

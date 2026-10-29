@@ -115,14 +115,16 @@ board. [C][I]
 - The DSP runs the **current (torque) loop**: phase currents from the AD7874, PWM out,
   driver module IDs/ready bits from `$3030`. Position and speed loops are on the SERVO
   board's V810. [C][I]
-- **SPORT0 is most likely the serial absolute-encoder link.** The DSP is the clock master
-  and sends 16-bit frames. The SERVO board triggers a read per motor with `$8082`/`$8084`
-  (its monitor command `ABSCOPY (axis) -> UPDATE COUNTER FROM SERIAL ABS`), and the DSP
-  acks when the SPORT0 state machine finishes. [I]
-- Incremental position is probably counted in the CXD8501R (`$3029`/`$302D`, read twice for
-  a stable value by the DSP and read per axis by the SERVO board). [H]
-- So the encoder lines most likely **end at the Control board**. The earlier
-  "pass-through to SERVO" guess is withdrawn. [H]
+- **SPORT0 is the serial absolute-encoder link** — decoded in `doc/abs_encoder_protocol.md`.
+  It is receive-only: the DSP clocks SCLK and samples the encoder data line 16× per bit.
+  The SERVO board starts a read per motor with `$8082`/`$8084` (its monitor command
+  `ABSCOPY (axis) -> UPDATE COUNTER FROM SERIAL ABS`). The DSP decodes two 24-bit blocks
+  with CRC-5, loads the 24-bit position into the CXD8501R counters (`$3026/27` motor A,
+  `$302A/2B` motor B), puts the status byte into `$3003` and acks. [C]
+- The CXD8501R counters then count the incremental signals; the SERVO board reads them as
+  signed 24-bit positions. [C][I]
+- So the encoder lines **end at the Control board**. The earlier "pass-through to SERVO"
+  guess is withdrawn. [I]
 
 ## 7. Tool limits (`tools/adsp/adsp21xx.py`)
 
@@ -143,6 +145,5 @@ board. [C][I]
    current scaling per module type.
 3. ~~Match the mailbox with the SERVO side~~ — done: `doc/servo_dsp_link.md` (window
    `0x400000`/`0x400080`, commands `$8001`, `$8000–$8006`, `$8082/$8084`, pokes `$D8A8–$D8AB`).
-4. Decode the SPORT0 state machine (`$0389`, `$039A`, `$03EA`) as the serial ABS frame and
-   find where the result lands (`$3009`/`$300B`?).
+4. ~~Decode the SPORT0 state machine~~ — done: `doc/abs_encoder_protocol.md`.
 5. Hardware: continuity-test the feedback connector → Control board → 50-pin cable.
