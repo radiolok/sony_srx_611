@@ -465,10 +465,11 @@ So the PLC scan time is tied to the servo sampling period, and a servo board tha
 interrupting also stops the PLC. The CPU-side error texts for this path are `SERVO CPU
 communication error`, `SVO WATCHDOG ERR`, `SLOT ACCESS ERR` and `Servo board is disconnected`.
 
-**Hardware context.** The owner reports **four physically separate servo controllers**. That fits
-this design: one servo board per axis in slots 1–4, each with its own DPRAM and IRQ, with a
-SLOT/AXIS map of `axis n → slot n, sub-axis 0`. Slot 5 is then free for a fifth board or an I/O
-board. The firmware itself would also accept up to 4 axes on one board.
+**Hardware context (corrected 2026-10-29).** The owner's unit has **one** SRX6-SERVO board for
+all four axes, plus two I/O boards, in the card cage; the "four servo controllers" reported
+earlier are the four motor **drivers** behind one Control board (2× ADSP-2115). So the SLOT/AXIS
+map must put axes 1–4 on sub-axes 0–3 of a single servo slot. See `doc/hardware_overview.md`
+and, for the servo board's link to the DSPs, `doc/servo_dsp_link.md`.
 
 The servo board firmware (`FW/SRX6-SERVO/ROM_SERVO.bin`) runs on an **NEC V810 (µPD70732)**:
 - its reset vector at `0x3FFF0` is `movhi 0x10,r0,r31; jmp [r31]`, and its interrupt slots hold
@@ -617,12 +618,14 @@ The CPU renders every TP screen. TPCT's menu handlers (`0x65C44`, `0x66D24`, `0x
 
 ## 12. Open questions (need the owner or hardware)
 
-1. **Slot population.** Which slots hold the four servo controllers, and is slot 5 empty, an I/O
-   board or something else? The five latches at ports `0x30–0x40` and the "SLOT/AXIS" screen
-   values from a real unit would settle this.
+1. **Slot population.** Partly answered (2026-10-29): the unit has one SERVO board and two I/O
+   boards (plus CPU + SIO2), two slots empty. Still open: which physical slot is which DPRAM
+   window. The five latches at ports `0x30–0x40` and the "SLOT/AXIS" screen values from a real
+   unit would settle this.
 2. **Servo DPRAM semantics.** Confirm the meaning of the per-axis block fields (`+0x08/0x0C/0x10`,
-   `+0x14` bits, command word values) against the servo-board (V810) firmware: disassemble
-   `ROM_SERVO.bin` at `0x00100000` and find the code that touches its side of the DPRAM.
+   `+0x14` bits, command word values) against the servo-board (V810) firmware. The servo side of
+   this DPRAM is at V810 `0x200000` (ROM runs from RAM at address 0, `gp=0x2BAEC`); tool
+   `tools/v810/v810dis.py`, see `doc/servo_dsp_link.md` §1.
 3. **8254 clock and TP baud rate.** Confirm the 3.072 MHz clock and whether ch 1/ch 2 both run from
    ctr2 (a logic-analyser trace on the TP cable would give the baud rate directly).
 4. **Optional 4-channel serial board** at `0x2000000`: which option is it ("EXTERNAL ONLINE"?).

@@ -95,7 +95,15 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
   setting, so here all four axes must map to sub-axes of one servo slot.
 - Board parts (photo): 2× MB8421 dual-port RAM (the slot DPRAM), 2× Sony CXD8477Q,
   PLDs S6S-*, DB9 monitor port, TX3-50P front connector (probably the cable to the Control
-  board). `AMP ERROR(axis 1/2)` probably means DSP channel 1/2 of the Control board.
+  board).
+- **Run-time layout (2026-10-29):** start-up copies the ROM to RAM at **address 0** and runs
+  there (run-time address = file offset); `gp = 0x2BAEC`. CPU DPRAM at `0x200000` (`+0xF00`
+  version, `+0xFFC` mailbox); **DSP 1 / DSP 2 windows at `0x400000` / `0x400080`** (= DSP DM
+  `$3000–$303F`, word n at byte 2n); pointer table at `0x23B44`. Commands sent: `0x8001`
+  connect, `0x8000/2/4/6` servo off/on, `0x8082/0x8084` serial ABS read (ABSCOPY),
+  `0xD8A8–0xD8AB` monitor-variable pokes; ack = command word back to 0. Axes 1/2 = DSP 1,
+  axes 3/4 = DSP 2. Tool `tools/v810/v810dis.py`; report `doc/servo_dsp_link.md`;
+  constants `FW/SRX6-SERVO/ROM_SERVO_periph.txt`.
 
 ### 2.4 Control board — 2× ADSP-2115 (dumps in `FW/SERVO_IO/`)
 
@@ -242,6 +250,7 @@ these:
 | `SRXMONIE_help.md` | Full text of `SRXMONIE.HLP` (generated): LUNA/PLC command reference, GUI, error list |
 | `hardware_overview.md` | Controller block diagram and per-board sections (photo + diagram + parts): CPU, SIO2 mezzanine, Mother board, SERVO, I/O, Control board, drivers, SPD panel; open hardware questions |
 | `control_board_firmware.md` | Control board ADSP-2115 firmware, first pass: boot pages, set-up registers, DM map (mailbox, PWM, ADC, IDs), interrupts, host commands, page-2 ADC mode |
+| `servo_dsp_link.md` | SERVO (V810) side of the DSP mailbox: V810 run-time layout, DSP windows `0x400000/0x400080`, pointer table, handshake, command list, axis↔DSP map, encoder conclusions |
 
 ## 4. Target platform (CPU board, facts)
 
@@ -560,8 +569,9 @@ Lists"), and the codes are `E000…E400` only. E401 appears in neither the manua
 - Boot EPROM: write up the analysis (only IDA DBs exist).
 - Servo board: document `ROM_SERVO.bin` (V810, code at `0x00100000`; monitor console, amplifier diagnostics, DPRAM side of the slot protocol).
 - ~~Servo-I/O board: identify the CPU~~ (done 2026-10-29: Control board, 2× ADSP-2115).
-  Next: mark PM data areas in `tools/adsp/`, follow the IRQ1 current loop, and match the
-  mailbox commands with the SERVO side in `ROM_SERVO.bin`.
+  Next: mark PM data areas in `tools/adsp/`, follow the IRQ1 current loop, decode the
+  SPORT0 serial-ABS state machine. (~~Match the mailbox with the SERVO side~~ — done:
+  `doc/servo_dsp_link.md`.)
 - Hardware (see `doc/hardware_overview.md` §10): where the SERVO 50-pin cable goes; whether
   encoder lines stop at the Control board; slot ↔ DPRAM window map.
 - SRXWIN (done 2026-09-26: help extraction, LUNA symbol table, DOS-tool protocol):

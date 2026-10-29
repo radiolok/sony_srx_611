@@ -89,8 +89,10 @@ Key points:
 - **Drive section.** The four driver modules and the **single** Control board plug into
   one long backplane. Motor power comes into this backplane, and the encoder/feedback
   connector is on it. The feedback signals reach the Control board's connector. [O]
-  Whether the Control board uses them or passes them on to SERVO is not yet known. The
-  DSP code shows no encoder handling so far, which points to "passed on". [H] (§7)
+  The firmware on both sides suggests they **end there**: the DSPs read the serial
+  absolute encoders over SPORT0 when SERVO sends `0x8082/0x8084` (its `ABSCOPY`
+  command), and the incremental counts are probably in the CXD8501R
+  (`doc/servo_dsp_link.md` §6). [I][H]
 - **Control board** has two ADSP-2115 DSPs; each runs the current loop and the 3-phase
   PWM for **two axes**. [F]
 - **SPD panel board** (front, L-shaped) carries the over-speed detector and the safety
@@ -240,11 +242,13 @@ flowchart LR
 | CPU | NEC µPD70732 V810 (code at `0x00100000`) | [P][F] |
 | Firmware | 2× P28F010, byte-interleaved → `ROM_SERVO.bin` ("Servo Board Monitor ©1995 Sony") | [F] |
 | Host link | 2× MB8421 dual-port RAM — the CPU board sees it as one slot DPRAM window (kind byte 1) | [P][F] |
-| Custom ASICs | 2× Sony CXD8477Q. One per Control-board DSP? Candidates: link to the DSPs, or encoder receivers | [P][H] |
+| Custom ASICs | 2× Sony CXD8477Q. Function unknown; the DSP link and the encoders are handled on the Control board, so maybe bus/link interface or timers | [P][H] |
 | Front | TX3-50P (to the Control board, to confirm) and DB9 monitor port | [P][H] |
 
-The monitor's `AMP ERROR(axis 1/2)` texts probably mean **DSP channel 1/2** of the Control
-board (each DSP drives two motors), not robot axis 1/2. [H]
+The SERVO board reaches the two DSPs' CXD8501R register blocks at V810 `0x400000` and
+`0x400080`; its CPU-side DPRAM is at `0x200000` (`doc/servo_dsp_link.md`). [F] The monitor's
+`AMP ERROR(axis 1/2)` / `(axis 3/4)` texts mean **DSP 1 (axes 1, 2)** and **DSP 2 (axes 3,
+4)**. [F]
 
 ---
 
@@ -379,9 +383,10 @@ flowchart LR
 
 ## 10. Open questions (hardware)
 
-1. Where does the 50-pin cable from the SERVO front (TX3-50P) go: Control board or SPD?
-2. Do the encoder signals stop at the Control board or continue to SERVO? (The DSP code
-   shows no encoder handling — `doc/control_board_firmware.md` §6.)
+1. Confirm the 50-pin cable from the SERVO front (TX3-50P) goes to the Control board
+   (firmware says SERVO addresses both DSP windows at `0x400000/0x400080`).
+2. Confirm the encoder lines stop at the Control board (firmware points that way —
+   `doc/servo_dsp_link.md` §6): serial ABS → DSP SPORT0, A/B/UVW → CXD8501R?
 3. Which Mother-board slot is which DPRAM window, and what are the slot pads for?
 4. SIO2 oscillator frequency and the meaning of SW2–SW6.
 5. Why ~48 photocouplers for 24 inputs on SRX6-I/O; how many outputs.

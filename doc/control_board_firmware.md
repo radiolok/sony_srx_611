@@ -63,7 +63,7 @@ the tool's `CTRL_REGS` table should be checked once more against the data sheet.
 | `$3021` | ASIC control/status | bit 7 (`$0080`), bits 7–9 (`$0380`), bits 13–15 (`$E000`) read; `$60/$61/$80/$81/$03` written | [C] |
 | `$3022`, `$3023` | ASIC fault/enable bits | bits 0–2 written `6`/`7`; read back in the IRQ2 handler | [C][I] |
 | `$3025` | ASIC control | `$0080` after each ADC cycle (page 2), `$000F` before reboot into page 2 | [C] |
-| `$3029`, `$302D` | ASIC counters/latches | read twice and compared (stable read of a running value); set from page-0 tables | [C][H] |
+| `$3029`, `$302D` | ASIC per-motor counters/latches (motor A / B) | DSP reads them twice and compares (stable read of a running value); page 0 sets them from tables; the SERVO board reads them per axis (`sub_0BB4`) — incremental position counters? | [C][H] |
 | `$3030` | **driver module ID + ready bits** | bits 0–3 / 8–11: 4-bit module code per motor (`8`, `9`, `A`, `C` known); bits 4 / 12 (`$1010`, active low): ready/fault per motor | [C][I] |
 | `$3033` | **PWM carrier period** | `1000` (`$03E8`) at start; `$0FFF` before entering page 2 | [C][I] |
 | `$3034–$3036` | PWM set-up | `$000F` (dead time?), `$0FFF`, `$0000` | [C][H] |
@@ -91,9 +91,10 @@ status/ID inputs. [I]
 
 | Command | Action |
 |---|---|
-| `$Cxxx` | **peek**: read DM or PM (an address bit selects which) → reply in `$3001` |
+| `$Cxxx` | **peek**: 12-bit field, `$000–$7FF` = PM `$000–$7FF`, `$800–$FFF` = DM `$3800–$3FFF` → reply in `$3001` |
 | `$Dxxx` | **poke**: write the data word to DM/PM. The word must equal the current `$3001`, a consistency check against the copy taken at loop start |
 | `$8001` | **enable** request: clears `$3022`; unless FLAG_IN is set, writes `7` to `$3023` and checks the driver ready bits in `$3030`; then `6` to `$3023`, checks `$3021`/`$3022`, acknowledges |
+| `$8082`, `$8084` | not handled by the main loop (no ack there). The **IRQ2** path (`loc_01E2`, mask `$FFEF`) starts the SPORT0 state machine and acks (`$3000 = 0`) when it finishes → **serial absolute-encoder read** for motor A / B (SERVO monitor `ABSCOPY`). See `doc/servo_dsp_link.md` |
 | `$8000`, `$8002`, `$8004`, `$8006`, `$9002` | **mode** commands: `cmd − $8000` (0, 2, 4, 6, `$1002`) is stored in `$3800`. Bits 1 and 2 enable motor A / motor B of the pair (the state of a disabled motor is cleared). FLAG_OUT is set while either is enabled |
 
 **Entering page 2.** `loc_03EB` checks for the magic pair `$4123`, `$1002` in DM
@@ -109,14 +110,19 @@ board. [C][I]
 
 ## 6. What the code says about feedback
 
-- The DSP code reads **phase currents** (AD7874) and **driver module IDs/ready bits**
-  (`$3030`), and writes **PWM**. No routine so far looks like encoder decoding (no
-  quadrature counting, no serial-encoder frame handling). [I]
-- That fits a **current (torque) loop on the DSPs**, with position and speed loops on the
-  SERVO board's V810. In that case the encoder lines that reach the Control-board connector
-  are only **passed through** to SERVO (cable or CXD8501R → host). Continuity test needed. [H]
-- The SPORT0 link (DSP = clock master, 16-bit words) has an unknown partner. Candidates:
-  the SERVO board (2× CXD8477Q — one per DSP?), or the drivers. [H]
+*Revised after the SERVO side was found (`doc/servo_dsp_link.md`).*
+
+- The DSP runs the **current (torque) loop**: phase currents from the AD7874, PWM out,
+  driver module IDs/ready bits from `$3030`. Position and speed loops are on the SERVO
+  board's V810. [C][I]
+- **SPORT0 is most likely the serial absolute-encoder link.** The DSP is the clock master
+  and sends 16-bit frames. The SERVO board triggers a read per motor with `$8082`/`$8084`
+  (its monitor command `ABSCOPY (axis) -> UPDATE COUNTER FROM SERIAL ABS`), and the DSP
+  acks when the SPORT0 state machine finishes. [I]
+- Incremental position is probably counted in the CXD8501R (`$3029`/`$302D`, read twice for
+  a stable value by the DSP and read per axis by the SERVO board). [H]
+- So the encoder lines most likely **end at the Control board**. The earlier
+  "pass-through to SERVO" guess is withdrawn. [H]
 
 ## 7. Tool limits (`tools/adsp/adsp21xx.py`)
 
@@ -135,8 +141,8 @@ board. [C][I]
    as tables.
 2. Follow the IRQ1 path (`sub_02A0`, `sub_02F5`, `sub_02FF`): filter coefficients, PI gains,
    current scaling per module type.
-3. Match the mailbox layout with the **SERVO board side** in `ROM_SERVO.bin`: look for
-   writes of `$Cxxx`/`$Dxxx`/`$8001` and the magic `$4123,$1002`. That confirms the 50-pin
-   link and names the commands.
-4. Name the SPORT0 state machine states (`$0389`, `$039A`, `$03EA`).
+3. ~~Match the mailbox with the SERVO side~~ — done: `doc/servo_dsp_link.md` (window
+   `0x400000`/`0x400080`, commands `$8001`, `$8000–$8006`, `$8082/$8084`, pokes `$D8A8–$D8AB`).
+4. Decode the SPORT0 state machine (`$0389`, `$039A`, `$03EA`) as the serial ABS frame and
+   find where the result lands (`$3009`/`$300B`?).
 5. Hardware: continuity-test the feedback connector → Control board → 50-pin cable.
