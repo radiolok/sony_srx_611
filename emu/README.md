@@ -5,11 +5,19 @@ SRX-611 SCARA robot controller and runs the original firmware of every board:
 CPU (i486), SERVO (V810), Control board (2× ADSP-2115). See
 `doc/emulator_plan.md` for the plan, board models and milestones.
 
-**Current state: stage 0 (skeleton).** All four CPUs are declared, the firmware
-is loaded, and the known RAM/ROM regions are mapped; everything else is an
-unmapped access that MAME logs (the "trace stub" of plan §7). Verified: the
-i486 boots from the boot-EPROM reset vector, the V810 starts from `ROM_SERVO.bin`
-and the two ADSP-2115s run their boot loader.
+**Current state: stages 0-4 (partial).** All four CPUs are declared and run
+their firmware; the SERVO peripherals and DSP windows (stages 1-3) are modelled,
+and the CPU board now has its 3× 8251A, 8254, 2× 8259A, RTC, EEPROM and PC-card
+window (stage 4). The main firmware starts pSOS+ tasks; the teach-pendant link
+performs the `SRX6` ↔ `TP4` handshake and the PC host link answers protocol
+frames when a peer is connected.
+
+The three serial channels open a pseudo terminal by default (MAME prints e.g.
+`SRX: serial ch1 (teach pendant) pty: /dev/pts/0`). Connect to that device from
+the host to drive the pendant / SRXWIN protocol. The 8 KB CPU-board EEPROM image
+is not available (plan §6.1): `make_roms.sh` creates a blank `eeprom.bin` on
+first run and never overwrites an existing one, so a real dump can be dropped
+in later.
 
 ## Layout
 

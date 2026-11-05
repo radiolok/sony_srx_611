@@ -44,6 +44,32 @@
     DPRAM host handshake (stage 1 finding), so it cannot issue CONNECT by
     itself yet.  Remove it when the CPU side drives the handshake (stage 5).
 
+    Stage 4 (this file): CPU-board peripherals.
+      - 3x 8251A: ch1 0xC0/C4 teach pendant, ch2 0xC8/CC PC host,
+        ch3 0xD0/D4 user RS-232C.  Each has an rs232_port slot whose default
+        card is "pty" (pseudo terminal), so an external program can drive the
+        pendant / SRXWIN protocol.  Counter 2 of the 8254 clocks ch1+ch2,
+        counter 1 clocks ch3 (architecture report 6.1).
+      - 8254 at 0xB0-0xBC, 3.072 MHz input; counter 0 = 100 Hz system tick
+        -> slave PIC IR2, counters 1/2 = serial baud clocks.
+      - 2x 8259A: master 0xA0/A4, slave 0xA8/AC cascaded on master IR7,
+        vectors 0x20/0x28, IRQ lines wired as architecture report 4.3.
+      - MSM6242 RTC at 0x60-0x9C (16 BCD registers, stride 4).
+      - 8 KB EEPROM at 0x600000, busy/status port 0x0C.  The real contents
+        are NOT available (plan 6.1, P1).  A blank (0xFF) image is filled
+        from an optional "eeprom.bin" ROM in the "eeprom" region; drop a
+        real dump in the ROM set with that name to use it.  Writes go to a
+        RAM copy for the session (nothing persists).
+      - PC-card window 0x200000 returns 0xFF ("no card"), port 0x4C bit 0 =
+        attribute-memory select (stored and logged).
+      - Slot latches 0x30/34/38/3C/40 (stored and logged), five 64 KB slot
+        DPRAM windows at 0x700000 + (s-1)*0x10000 as plain RAM.  Slot 1 is
+        initialised as a servo board (kind byte 1), slots 2/3 as I/O boards
+        (kind 3), slots 4/5 empty -- this is the plan 5.2 population guess
+        and must be confirmed (plan 6.13).  The MB8421 mailbox/IRQ behaviour
+        stays stage 5.  The optional SIO2 board at 0x2000000 is absent; the
+        firmware probe (0x7E24) tolerates it (reads != 0x0500).
+
     TODO (plan milestones):
       1. SERVO monitor UART (banner string at ROM offset 0x21CDA) -> TCP terminal
       2. Control-board CXD8501R + AD7874 models, DSP boot pages + BFORCE, IRQ1/2
@@ -58,6 +84,14 @@
 #include "cpu/i386/i386.h"
 #include "cpu/v810/v810.h"
 #include "cpu/adsp2100/adsp2100.h"
+
+#include "bus/rs232/rs232.h"
+#include "machine/i8251.h"
+#include "machine/msm6242.h"
+#include "machine/pic8259.h"
+#include "machine/pit8253.h"
+
+#include "dipty.h"
 
 #include <algorithm>
 #include <iterator>
@@ -105,6 +139,14 @@ public:
 		, m_dsp2(*this, "dsp2")
 		, m_dsp1_pm(*this, "dsp1_pm")
 		, m_dsp2_pm(*this, "dsp2_pm")
+		, m_pit(*this, "pit")
+		, m_pic_master(*this, "pic_master")
+		, m_pic_slave(*this, "pic_slave")
+		, m_uart(*this, "uart%u", 0U)
+		, m_rs232(*this, "rs232_%u", 1U)
+		, m_rtc(*this, "rtc")
+		, m_slot_ram(*this, "slot_ram")
+		, m_eeprom_ram(*this, "eeprom_ram")
 	{
 	}
 
@@ -121,6 +163,16 @@ private:
 	required_shared_ptr<uint32_t> m_dsp1_pm;
 	required_shared_ptr<uint32_t> m_dsp2_pm;
 
+	// stage 4: CPU board peripherals
+	required_device<pit8254_device> m_pit;
+	required_device<pic8259_device> m_pic_master;
+	required_device<pic8259_device> m_pic_slave;
+	required_device_array<i8251_device, 3> m_uart;
+	required_device_array<rs232_port_device, 3> m_rs232;
+	required_device<msm6242_device> m_rtc;
+	required_shared_ptr<uint32_t> m_slot_ram;
+	required_shared_ptr<uint32_t> m_eeprom_ram;
+
 	void maincpu_map(address_map &map);
 	void maincpu_io_map(address_map &map);
 	void servocpu_map(address_map &map);
@@ -131,6 +183,71 @@ private:
 
 	uint8_t diag_io_r();
 	void diag_io_w(uint8_t data);
+
+	// stage 4: CPU board I/O handlers
+	uint8_t pit_r(offs_t offset);
+	void pit_w(offs_t offset, uint8_t data);
+	uint8_t pic_master_r(offs_t offset);
+	void pic_master_w(offs_t offset, uint8_t data);
+	uint8_t pic_slave_r(offs_t offset);
+	void pic_slave_w(offs_t offset, uint8_t data);
+	uint8_t rtc_r(offs_t offset);
+	void rtc_w(offs_t offset, uint8_t data);
+	uint8_t sys_input0_r();
+	uint8_t sys_input1_r();
+	uint8_t eeprom_status_r();
+	void eeprom_status_w(uint8_t data);
+	uint8_t pccard_attr_r();
+	void pccard_attr_w(uint8_t data);
+	uint8_t pccard_r(offs_t offset);
+	void pccard_w(offs_t offset, uint8_t data);
+	uint8_t slot_latch_r(offs_t offset);
+	void slot_latch_w(offs_t offset, uint8_t data);
+	void flash_w(offs_t offset, uint32_t data, uint32_t mem_mask);
+	void pit_out0_w(int state);
+	void pit_out1_w(int state);
+	void pit_out2_w(int state);
+	void blitter_stub_w(offs_t offset, uint8_t data);
+
+	// 8251 access wrappers with a bounded transmit/control trace.
+	uint8_t uart_data_r(int ch);
+	void uart_data_w(int ch, uint8_t data);
+	uint8_t uart_status_r(int ch);
+	void uart_ctrl_w(int ch, uint8_t data);
+	uint8_t uart1_data_r() { return uart_data_r(0); }
+	void uart1_data_w(uint8_t data) { uart_data_w(0, data); }
+	uint8_t uart1_status_r() { return uart_status_r(0); }
+	void uart1_ctrl_w(uint8_t data) { uart_ctrl_w(0, data); }
+	uint8_t uart2_data_r() { return uart_data_r(1); }
+	void uart2_data_w(uint8_t data) { uart_data_w(1, data); }
+	uint8_t uart2_status_r() { return uart_status_r(1); }
+	void uart2_ctrl_w(uint8_t data) { uart_ctrl_w(1, data); }
+	uint8_t uart3_data_r() { return uart_data_r(2); }
+	void uart3_data_w(uint8_t data) { uart_data_w(2, data); }
+	uint8_t uart3_status_r() { return uart_status_r(2); }
+	void uart3_ctrl_w(uint8_t data) { uart_ctrl_w(2, data); }
+	void uart_cts_assert(int unused);
+	void uart_txrdy_w(int ch, int state);
+	void uart_rxrdy_w(int ch, int state);
+	void uart1_txrdy_w(int state) { uart_txrdy_w(0, state); }
+	void uart2_txrdy_w(int state) { uart_txrdy_w(1, state); }
+	void uart3_txrdy_w(int state) { uart_txrdy_w(2, state); }
+	void uart1_rxrdy_w(int state) { uart_rxrdy_w(0, state); }
+	void uart2_rxrdy_w(int state) { uart_rxrdy_w(1, state); }
+	void uart3_rxrdy_w(int state) { uart_rxrdy_w(2, state); }
+
+	uint8_t m_slot_latch[5];
+	bool m_pccard_attr;
+	unsigned m_flash_writes;
+	unsigned m_pccard_writes;
+	unsigned m_slot_latch_writes[5];
+	unsigned m_tick_out;
+	unsigned m_uart_tx_count[3];
+	unsigned m_uart_ctrl_count[3];
+	unsigned m_uart_txrdy_count[3];
+	bool m_uart_initialized[3];
+	unsigned m_sys_input_reads[2];
+	emu_timer *m_cts_timer;
 
 	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
 	// logged; printable bytes are surfaced as console output.
@@ -202,15 +319,41 @@ private:
 void srx_c61_state::maincpu_map(address_map &map)
 {
 	map(0x00000000, 0x001fffff).ram();                         // 2 MB SRAM at 0
-	map(0xffe00000, 0xffefffff).rom().region("maincpu", 0);    // 1 MB main flash (ROM1-C.bin)
+	map(0x00200000, 0x002fffff).rw(FUNC(srx_c61_state::pccard_r), FUNC(srx_c61_state::pccard_w)); // PC card window (empty: reads 0xFF)
+	map(0x00600000, 0x00601fff).ram().share(m_eeprom_ram);      // 8 KB EEPROM (RAM copy of the blank/optional image)
+	map(0x00700000, 0x0074ffff).ram().share(m_slot_ram);        // 5 slot DPRAM windows (64 KB each)
+	map(0xffe00000, 0xffefffff).rom().region("maincpu", 0).w(FUNC(srx_c61_state::flash_w)); // 1 MB main flash (ROM1-C.bin), writes logged
 	map(0xffff8000, 0xffffffff).rom().region("boot", 0);       // 32 KB boot EPROM (reset vector)
 }
 
 void srx_c61_state::maincpu_io_map(address_map &map)
 {
+	map(0x0000, 0x0000).r(FUNC(srx_c61_state::sys_input0_r));  // CPU-board system input byte
+	map(0x0008, 0x0008).r(FUNC(srx_c61_state::sys_input1_r));  // CPU-board system input/status byte
+	map(0x000c, 0x000c).rw(FUNC(srx_c61_state::eeprom_status_r), FUNC(srx_c61_state::eeprom_status_w));
 	map(0x0020, 0x0020).rw(FUNC(srx_c61_state::diag_io_r), FUNC(srx_c61_state::diag_io_w)); // diagnostic/halt-code port
-	// stage 4: 8251 x3 (C0/C4, C8/CC, D0/D4), 8254 (B0-BC), 8259 x2 (A0/A4, A8/AC),
-	//           RTC (60-9C), EEPROM busy flag (0C), PC card (4C), slot latches (30-40)
+	map(0x0024, 0x0024).w(FUNC(srx_c61_state::blitter_stub_w));  // boot EPROM writes 2 (unknown latch)
+	map(0x0028, 0x0028).w(FUNC(srx_c61_state::blitter_stub_w));  // SIO2 scan writes 0..7 (unknown latch)
+	map(0x0030, 0x0043).rw(FUNC(srx_c61_state::slot_latch_r), FUNC(srx_c61_state::slot_latch_w));
+	map(0x004c, 0x004c).rw(FUNC(srx_c61_state::pccard_attr_r), FUNC(srx_c61_state::pccard_attr_w)); // PC card attribute select
+
+	// 8259A pair: even port = command, odd (stride 4) = data
+	map(0x00a0, 0x00a7).rw(FUNC(srx_c61_state::pic_master_r), FUNC(srx_c61_state::pic_master_w));
+	map(0x00a8, 0x00af).rw(FUNC(srx_c61_state::pic_slave_r), FUNC(srx_c61_state::pic_slave_w));
+
+	// 8254: counter 0/1/2 at 0xB0/0xB4/0xB8, control at 0xBC
+	map(0x00b0, 0x00bf).rw(FUNC(srx_c61_state::pit_r), FUNC(srx_c61_state::pit_w));
+
+	// RTC, 16 BCD registers with a 4-byte port stride
+	map(0x0060, 0x009f).rw(FUNC(srx_c61_state::rtc_r), FUNC(srx_c61_state::rtc_w));
+
+	// 8251A x3: data/status+control pairs, 4-byte port stride
+	map(0x00c0, 0x00c0).rw(FUNC(srx_c61_state::uart1_data_r),   FUNC(srx_c61_state::uart1_data_w));
+	map(0x00c4, 0x00c4).rw(FUNC(srx_c61_state::uart1_status_r), FUNC(srx_c61_state::uart1_ctrl_w));
+	map(0x00c8, 0x00c8).rw(FUNC(srx_c61_state::uart2_data_r),   FUNC(srx_c61_state::uart2_data_w));
+	map(0x00cc, 0x00cc).rw(FUNC(srx_c61_state::uart2_status_r), FUNC(srx_c61_state::uart2_ctrl_w));
+	map(0x00d0, 0x00d0).rw(FUNC(srx_c61_state::uart3_data_r),   FUNC(srx_c61_state::uart3_data_w));
+	map(0x00d4, 0x00d4).rw(FUNC(srx_c61_state::uart3_status_r), FUNC(srx_c61_state::uart3_ctrl_w));
 }
 
 // SERVO board (V810): ROM copied to RAM at 0 on boot.  gp = 0x2BAEC.
@@ -299,6 +442,255 @@ void srx_c61_state::diag_io_w(uint8_t data)
 {
 	// Port 0x20 is the boot progress / fatal-halt output (plan 7.6).
 	logerror("%s: diag port 0x20 = 0x%02X\n", machine().describe_context(), data);
+}
+
+void srx_c61_state::blitter_stub_w(offs_t offset, uint8_t data)
+{
+	// Unidentified write-only latch on the CPU board (boot EPROM writes 2 to
+	// 0x24; the SIO2 probe writes the channel number to 0x28).  Stored nowhere
+	// on purpose: log only, so a wrong assumption cannot change behaviour.
+	logerror("%s: stub latch write <- 0x%02X\n", machine().describe_context(), data);
+}
+
+
+/***************************************************************************
+    CPU board peripherals (stage 4)
+***************************************************************************/
+
+// ---- 8254 -----------------------------------------------------------------
+// The I/O ports are 4 bytes apart, so the chip's counter index is (offset/4).
+uint8_t srx_c61_state::pit_r(offs_t offset)
+{
+	return m_pit->read((offset >> 2) & 3);
+}
+
+void srx_c61_state::pit_w(offs_t offset, uint8_t data)
+{
+	m_pit->write((offset >> 2) & 3, data);
+}
+
+void srx_c61_state::pit_out0_w(int state)
+{
+	// Counter 0 = 100 Hz system tick -> slave PIC IR2 (architecture 4.3).
+	if (state && m_tick_out == 0)
+		logerror("PIT: 100 Hz system tick running (counter 0 -> slave IR2)\n");
+	if (state)
+		m_tick_out++;
+	m_pic_slave->ir2_w(state);
+}
+
+void srx_c61_state::pit_out1_w(int state)
+{
+	// Counter 1 = user RS-232C (ch 3) baud clock.  Both the TxC and RxC pins
+	// of the 8251 are fed from it (architecture report 6.1).  The firmware
+	// programs divisor 10 at INIT (307.2 kHz) and changes it for RSSPEED.
+	m_uart[2]->write_txc(state);
+	m_uart[2]->write_rxc(state);
+}
+
+void srx_c61_state::pit_out2_w(int state)
+{
+	// Counter 2 = teach pendant (ch 1) and PC host (ch 2) baud clock.  The
+	// firmware programs divisor 20 -> 153.6 kHz = 9600 baud x16.
+	m_uart[0]->write_txc(state);
+	m_uart[0]->write_rxc(state);
+	m_uart[1]->write_txc(state);
+	m_uart[1]->write_rxc(state);
+}
+
+// ---- 8251A ----------------------------------------------------------------
+uint8_t srx_c61_state::uart_data_r(int ch)
+{
+	return m_uart[ch]->data_r();
+}
+
+void srx_c61_state::uart_data_w(int ch, uint8_t data)
+{
+	// Bounded trace of transmitted bytes: enough to see the pendant handshake
+	// and SRXWIN frames without flooding the log during normal operation.
+	if (m_uart_tx_count[ch] < 64)
+	{
+		logerror("serial ch%d TX: 0x%02X (%c)\n", ch + 1, data,
+				(data >= 0x20 && data < 0x7f) ? char(data) : '.');
+		m_uart_tx_count[ch]++;
+	}
+	m_uart[ch]->data_w(data);
+}
+
+uint8_t srx_c61_state::uart_status_r(int ch)
+{
+	return m_uart[ch]->status_r();
+}
+
+void srx_c61_state::uart_ctrl_w(int ch, uint8_t data)
+{
+	if (m_uart_ctrl_count[ch] < 16)
+	{
+		logerror("serial ch%d control <- 0x%02X\n", ch + 1, data);
+		m_uart_ctrl_count[ch]++;
+	}
+
+	// MAME's 8251 starts expecting a mode byte, while the firmware performs
+	// the standard power-on sequence "00 00 00 40 <mode> <command>".  Feeding
+	// all of it to the model makes 0x40 a (synchronous) mode byte and shifts
+	// everything, so the command is never accepted.  Drop the leading 00/40
+	// preamble once; the first other byte is the real mode byte.
+	if (!m_uart_initialized[ch])
+	{
+		if (data == 0x00 || data == 0x40)
+			return;
+		m_uart_initialized[ch] = true;
+	}
+
+	m_uart[ch]->control_w(data);
+}
+
+// The rs232 port device resets with CTS deasserted and its device_reset runs
+// after the pseudo-terminal card has driven it low, so the 8251 would stay
+// "clear to send = no" and never raise TxRDY.  Re-assert CTS once after the
+// reset storm: this model does not implement host flow control.
+void srx_c61_state::uart_cts_assert(int unused)
+{
+	logerror("SRX: serial CTS asserted (no host flow control modelled)\n");
+	for (int ch = 0; ch < 3; ch++)
+		m_uart[ch]->write_cts(0);
+}
+
+void srx_c61_state::uart_txrdy_w(int ch, int state)
+{
+	if (m_uart_txrdy_count[ch] < 2)
+	{
+		logerror("serial ch%d TxRDY = %d\n", ch + 1, state);
+		m_uart_txrdy_count[ch]++;
+	}
+	m_pic_slave->set_irq_line(3 + ch, state);
+}
+
+void srx_c61_state::uart_rxrdy_w(int ch, int state)
+{
+	m_pic_master->set_irq_line(1 + ch, state);
+}
+
+// ---- 8259A ----------------------------------------------------------------
+// Even port = command/status, next even port (stride 4) = data.
+uint8_t srx_c61_state::pic_master_r(offs_t offset)
+{
+	return m_pic_master->read((offset >> 2) & 1);
+}
+
+void srx_c61_state::pic_master_w(offs_t offset, uint8_t data)
+{
+	m_pic_master->write((offset >> 2) & 1, data);
+}
+
+uint8_t srx_c61_state::pic_slave_r(offs_t offset)
+{
+	return m_pic_slave->read((offset >> 2) & 1);
+}
+
+void srx_c61_state::pic_slave_w(offs_t offset, uint8_t data)
+{
+	m_pic_slave->write((offset >> 2) & 1, data);
+}
+
+// ---- RTC (MSM6242-like, 16 BCD registers) ---------------------------------
+uint8_t srx_c61_state::rtc_r(offs_t offset)
+{
+	return m_rtc->read((offset >> 2) & 0xf);
+}
+
+void srx_c61_state::rtc_w(offs_t offset, uint8_t data)
+{
+	m_rtc->write((offset >> 2) & 0xf, data);
+}
+
+// ---- CPU-board system inputs ----------------------------------------------
+// Ports 0x00 and 0x08 are read into the SYST input image at 0x4A08/0x4A09.
+// The port pin-out is not documented; the firmware shows that bit 4 of port
+// 0x08 means "teach pendant connected" (0x885C / 0x8884 gate the TPCT
+// handshake, and 0x8884 returns 1 = disconnected when the bit is clear).
+// Bits 0-3 are left at 0 (unknown switches, safe default); flip this model
+// once the CPU-board switches/sense lines are identified.
+uint8_t srx_c61_state::sys_input0_r()
+{
+	if (m_sys_input_reads[0]++ < 4)
+		logerror("system input port 0x00 read -> 0x00 (unknown, stub)\n");
+	return 0x00;
+}
+
+uint8_t srx_c61_state::sys_input1_r()
+{
+	if (m_sys_input_reads[1]++ < 4)
+		logerror("system input port 0x08 read -> 0x10 (bit4: pendant connected [I])\n");
+	return 0x10;
+}
+
+// ---- EEPROM ---------------------------------------------------------------
+// Port 0x0C: write-complete / status.  The boot EPROM (0x808C) proceeds only
+// when bit 0 and bit 1 are clear; the real chip content is the plan 6.1
+// blocker, so this model always reports "ready, no error".
+uint8_t srx_c61_state::eeprom_status_r()
+{
+	return 0x00;
+}
+
+void srx_c61_state::eeprom_status_w(uint8_t data)
+{
+	logerror("%s: EEPROM status port 0x0C <- 0x%02X\n", machine().describe_context(), data);
+}
+
+// ---- PC card --------------------------------------------------------------
+uint8_t srx_c61_state::pccard_attr_r()
+{
+	return m_pccard_attr ? 0x01 : 0x00;     // port 0x4C bit 0 only
+}
+
+void srx_c61_state::pccard_attr_w(uint8_t data)
+{
+	m_pccard_attr = BIT(data, 0);
+}
+
+// No card is fitted: an empty slot floats high, which is what the boot
+// EPROM's FAT directory scan (0x89E0..0x8A53) checks for (0xFF = no card).
+uint8_t srx_c61_state::pccard_r(offs_t offset)
+{
+	return 0xff;
+}
+
+void srx_c61_state::pccard_w(offs_t offset, uint8_t data)
+{
+	if (m_pccard_writes++ < 8)
+		logerror("%s: PC card write 0x%06X <- 0x%02X (attribute=%d, no card)\n",
+				machine().describe_context(), 0x200000 + offset, data, m_pccard_attr ? 1 : 0);
+}
+
+// ---- Slot latches ---------------------------------------------------------
+uint8_t srx_c61_state::slot_latch_r(offs_t offset)
+{
+	unsigned const slot = (offset >> 2) & 7;
+	return (slot < 5) ? m_slot_latch[slot] : 0xff;
+}
+
+void srx_c61_state::slot_latch_w(offs_t offset, uint8_t data)
+{
+	unsigned const slot = (offset >> 2) & 7;
+	if (slot >= 5)
+		return;
+
+	m_slot_latch[slot] = data;
+	if (m_slot_latch_writes[slot]++ < 4)
+		logerror("%s: slot latch %u <- 0x%02X\n", machine().describe_context(), slot + 1, data);
+}
+
+// ---- Flash writes ---------------------------------------------------------
+// The 28F400 flash needs command sequences; at this stage they are logged and
+// discarded (plan 5.1: "flash writes: log them, ignore at first").  RAM/
+// parameter storage is the EEPROM/PC card, not the flash.
+void srx_c61_state::flash_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	if (m_flash_writes++ < 32)
+		logerror("%s: flash write 0xFFE%05X <- 0x%08X & 0x%08X\n",
+				machine().describe_context(), offset, data, mem_mask);
 }
 
 // Stage 1: the SERVO 0x30000x block is the baud/SCI setup (observed command
@@ -665,6 +1057,56 @@ void srx_c61_state::srx_c61(machine_config &config)
 	ADSP2115(config, m_dsp2, 16'000'000);
 	m_dsp2->set_addrmap(AS_PROGRAM, &srx_c61_state::dsp2_program_map);
 	m_dsp2->set_addrmap(AS_DATA, &srx_c61_state::dsp2_data_map);
+
+	// ---- stage 4: CPU-board peripherals ----
+
+	// 8254: 3.072 MHz input (architecture report 6.1).  Counter 0 = 100 Hz
+	// system tick (divisor 0x7A12), counter 1/2 = serial baud clocks.
+	PIT8254(config, m_pit, 3'072'000);
+	m_pit->set_clk<0>(3'072'000);
+	m_pit->set_clk<1>(3'072'000);
+	m_pit->set_clk<2>(3'072'000);
+	m_pit->out_handler<0>().set(FUNC(srx_c61_state::pit_out0_w));
+	m_pit->out_handler<1>().set(FUNC(srx_c61_state::pit_out1_w));
+	m_pit->out_handler<2>().set(FUNC(srx_c61_state::pit_out2_w));
+
+	// 8259A pair, cascaded on master IR7, vectors 0x20 / 0x28.
+	PIC8259(config, m_pic_master, 0);
+	m_pic_master->out_int_callback().set_inputline(m_maincpu, 0);
+	m_pic_master->in_sp_callback().set_constant(1);
+	m_pic_master->read_slave_ack_callback().set(m_pic_slave, FUNC(pic8259_device::acknowledge));
+
+	PIC8259(config, m_pic_slave, 0);
+	m_pic_slave->out_int_callback().set(m_pic_master, FUNC(pic8259_device::ir7_w));
+	m_pic_slave->in_sp_callback().set_constant(0);
+
+	m_maincpu->set_irq_acknowledge_callback(m_pic_master, FUNC(pic8259_device::inta_cb));
+
+	// Three 8251A USARTs.  External TxC/RxC from the 8254, so clock = 0.
+	for (int ch = 0; ch < 3; ch++)
+	{
+		I8251(config, m_uart[ch], 0);
+
+		RS232_PORT(config, m_rs232[ch], default_rs232_devices, "pty");
+		m_uart[ch]->txd_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_txd));
+		m_uart[ch]->dtr_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_dtr));
+		m_uart[ch]->rts_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_rts));
+		m_rs232[ch]->rxd_handler().set(m_uart[ch], FUNC(i8251_device::write_rxd));
+		m_rs232[ch]->dsr_handler().set(m_uart[ch], FUNC(i8251_device::write_dsr));
+		m_rs232[ch]->cts_handler().set(m_uart[ch], FUNC(i8251_device::write_cts));
+	}
+
+	// IRQ wiring from the serial channels (architecture report 4.3):
+	// RX = master IR1/IR2/IR3, TX = slave IR3/IR4/IR5.
+	m_uart[0]->rxrdy_handler().set(FUNC(srx_c61_state::uart1_rxrdy_w));
+	m_uart[1]->rxrdy_handler().set(FUNC(srx_c61_state::uart2_rxrdy_w));
+	m_uart[2]->rxrdy_handler().set(FUNC(srx_c61_state::uart3_rxrdy_w));
+	m_uart[0]->txrdy_handler().set(FUNC(srx_c61_state::uart1_txrdy_w));
+	m_uart[1]->txrdy_handler().set(FUNC(srx_c61_state::uart2_txrdy_w));
+	m_uart[2]->txrdy_handler().set(FUNC(srx_c61_state::uart3_txrdy_w));
+
+	// RTC: MSM6242-like part, 16 BCD registers on ports 0x60..0x9C.
+	MSM6242(config, m_rtc, 32.768_kHz_XTAL);
 }
 
 
@@ -708,6 +1150,64 @@ void srx_c61_state::machine_start()
 	m_irq2_timer[0]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 0, attotime::from_hz(DSP_IRQ2_HZ));
 	m_irq2_timer[1]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 1, attotime::from_hz(DSP_IRQ2_HZ));
 
+	// ---- stage 4: CPU-board state ----
+
+	std::fill(std::begin(m_slot_latch), std::end(m_slot_latch), 0);
+	std::fill(std::begin(m_slot_latch_writes), std::end(m_slot_latch_writes), 0);
+	m_pccard_attr = false;
+	m_flash_writes = 0;
+	m_pccard_writes = 0;
+	m_tick_out = 0;
+	m_cts_timer = timer_alloc(FUNC(srx_c61_state::uart_cts_assert), this);
+	m_cts_timer->adjust(attotime::from_msec(1));
+	std::fill(std::begin(m_uart_tx_count), std::end(m_uart_tx_count), 0);
+	std::fill(std::begin(m_uart_ctrl_count), std::end(m_uart_ctrl_count), 0);
+	std::fill(std::begin(m_uart_txrdy_count), std::end(m_uart_txrdy_count), 0);
+	std::fill(std::begin(m_uart_initialized), std::end(m_uart_initialized), false);
+	std::fill(std::begin(m_sys_input_reads), std::end(m_sys_input_reads), 0);
+
+	// Slot DPRAM header bytes (plan 5.2, architecture report 8.4): info at
+	// +0, kind at +1.  Population guess of the owner's unit: one SERVO board
+	// (kind 1) and two I/O boards (kind 3) in slots 1-3, slots 4/5 empty.
+	// Slot order is unconfirmed (plan 6.13), so keep this in one place.
+	// The shared RAM is 32-bit (the i486 program space is 32-bit wide), so
+	// address it as bytes through a cast.
+	uint8_t *slot = reinterpret_cast<uint8_t *>(&m_slot_ram[0]);
+	slot[0x00000] = 0x00;           // slot 1: servo board info byte
+	slot[0x00001] = 0x01;           // slot 1: kind 1 = servo
+	slot[0x10000] = 0x22;           // slot 2: I/O board, 2 in / 2 out groups
+	slot[0x10001] = 0x03;           // slot 2: kind 3 = I/O
+	slot[0x20000] = 0x22;           // slot 3: I/O board
+	slot[0x20001] = 0x03;
+	slot[0x30001] = 0x00;           // slot 4: empty
+	slot[0x40001] = 0x00;           // slot 5: empty
+
+	// EEPROM: copy the optional image (or the 0xFF fill from ROM_FILL) into
+	// the writable RAM copy.  The real chip contents are the plan 6.1 P1
+	// blocker; see the header comment.
+	if (memory_region *eeprom = memregion("eeprom"))
+	{
+		uint32_t const bytes = std::min<uint32_t>(0x2000, eeprom->bytes());
+		std::memcpy(&m_eeprom_ram[0], eeprom->base(), bytes);
+		if (std::any_of(eeprom->base(), eeprom->base() + bytes, [](uint8_t b) { return b != 0xff; }))
+			logerror("EEPROM: using image from the ROM set (real dump present)\n");
+		else
+			logerror("EEPROM: no real dump (plan 6.1); blank 0xFF image in use\n");
+	}
+
+	// The default peer of every rs232 port is a pseudo terminal; print its
+	// slave device so an external program can connect to it.
+	for (int ch = 0; ch < 3; ch++)
+	{
+		if (auto *pty = dynamic_cast<device_pty_interface *>(m_rs232[ch]->get_card_device()))
+		{
+			if (pty->is_open())
+				osd_printf_info("SRX: serial ch%d (%s) pty: %s\n", ch + 1,
+						ch == 0 ? "teach pendant" : (ch == 1 ? "PC host" : "user RS-232C"),
+						pty->slave_name());
+		}
+	}
+
 #if SRX_STAGE3_SELFTEST
 	m_selftest_timer->adjust(attotime::from_msec(500), 0);
 #endif
@@ -733,6 +1233,14 @@ ROM_START(srx_c61)
 
 	ROM_REGION(0x010000, "dsp2", 0)
 	ROM_LOAD("u18_dsp.bin", 0x000000, 0x010000, CRC(5aa49dc6) SHA1(d6262065093f3780789fdfb90606c27e8b1c31dc))
+
+	// 8 KB CPU-board EEPROM.  The real contents are NOT available (plan 6.1,
+	// P1 blocker).  make_roms.sh creates a blank (0xFF) "eeprom.bin" only if
+	// one is not already present, so a real dump can be dropped into the ROM
+	// set: MAME then reports a hash mismatch but still loads it -- update the
+	// CRC/SHA1 below once a real dump exists.
+	ROM_REGION(0x002000, "eeprom", 0)
+	ROM_LOAD("eeprom.bin", 0x000000, 0x002000, CRC(b4293435) SHA1(5e2b96c19c4f5c63a5afa2de504d29fe64a4c908))
 ROM_END
 
 } // anonymous namespace
