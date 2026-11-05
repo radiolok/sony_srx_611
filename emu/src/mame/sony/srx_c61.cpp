@@ -44,7 +44,29 @@
     DPRAM host handshake (stage 1 finding), so it cannot issue CONNECT by
     itself yet.  Remove it when the CPU side drives the handshake (stage 5).
 
-    Stage 4 (this file): CPU-board peripherals.
+    Stage 5 (this file): the whole system.
+      - The SERVO slot DPRAM is now a real 4 KB dual-port RAM shared by the
+        i486 slot window (0x700000, slot 1) and the V810 (0x200000), with an
+        explicit mailbox at +0xFFC.  A V810 mailbox write asserts master IR4
+        (slot 1) and the CPU ISR read of +0xFFC acknowledges it; a CPU mailbox
+        write asserts a V810 external line (line 10, guessed -- plan 6.4 is
+        still open, see V810_DPRAM_IRQ below).  The handshake (+0x04),
+        doorbell (+0x10), servo-on bits (+0x14), axis mask (+0x18), status
+        (+0x1C), parameter (+0x20) and per-axis blocks (+0x100*(k+1)) are just
+        shared bytes: both firmwares already implement the protocol, so no
+        protocol logic is added here (plan 7.3).
+      - Slots 2/3 model kind-3 I/O boards: the header comes from the SYST
+        scan at 0x108FC (info nibbles = input/output groups, input words at
+        +4, output words at +4+lo_nibble).  Their input word 0 is the field
+        input image, in which bit 6 is the DSS input (E401).  Outputs are
+        latched and logged.
+      - The safety chain (E-stop, DSS, AMPRDY, over-speed) is driven from
+        Lua through CPU I/O ports 0xF0-0xF7.  Safe defaults are all-clear.
+        The DSS state is injected into the I/O input image (bit 6), the DSP
+        FLAG_IN / $3021 / $303F status (default clear, so stage 2/3 behaviour
+        is unchanged) and the SERVO register stub.  See emu/tests/.
+
+    Stage 4: CPU-board peripherals.
       - 3x 8251A: ch1 0xC0/C4 teach pendant, ch2 0xC8/CC PC host,
         ch3 0xD0/D4 user RS-232C.  Each has an rs232_port slot whose default
         card is "pty" (pseudo terminal), so an external program can drive the
@@ -75,7 +97,8 @@
       2. Control-board CXD8501R + AD7874 models, DSP boot pages + BFORCE, IRQ1/2
       3. SERVO <-> Control windows 0x400000/0x400080
       4. CPU 8251/8254/8259, RTC, EEPROM image, PC card, slot kind bytes
-      5. CPU <-> SERVO MB8421 DPRAM + IRQs, I/O boards, plant, safety panel
+      5. CPU <-> SERVO DPRAM + IRQs, I/O boards, plant, safety panel
+      6. Plant: PWM -> current -> motion, encoder frames (plan 5.6)
 
 ***************************************************************************/
 
@@ -99,15 +122,56 @@
 
 namespace {
 
-// Temporary bring-up test: drive the V810->DSP windows directly to prove the
-// shared-register path and the command acknowledgement.  Remove when the CPU
-// side starts the DPRAM handshake and the SERVO monitor can issue CONNECT.
-#define SRX_STAGE3_SELFTEST 1
+// Stage-3 bring-up test: drive the V810->DSP windows directly to prove the
+// shared-register path and the command acknowledgement.  Stage 5 leaves it
+// off: the CPU now drives the DPRAM handshake, so the SERVO firmware issues
+// the CONNECT command itself.
+#define SRX_STAGE3_SELFTEST 0
+
+// V810 external interrupt line used for the CPU->SERVO mailbox.  The real
+// line is unknown (plan 6.4: the 0x300000/0x500000 registers and the V810
+// interrupt sources still have to be traced).  Line 10 is a plausible choice:
+// its vector (ROM 0x17B8) touches the DSP windows, so it is one of the
+// external/housekeeping vectors.  The CPU firmware only reads +0xFFC, so this
+// line stays clear in normal operation unless a Lua/debug client writes the
+// mailbox from the CPU side.
+static constexpr int V810_DPRAM_IRQ = 10;
+
+// Safety chain is a bitfield of *faults* (0 = all clear).  It is written by
+// Lua through CPU I/O port 0xF0; see emu/tests/stage5_safety.lua.
+static constexpr uint8_t SAFETY_ESTOP     = 0x01;
+static constexpr uint8_t SAFETY_DSS_OFF   = 0x02;
+static constexpr uint8_t SAFETY_AMPRDY    = 0x04;
+static constexpr uint8_t SAFETY_OVERSPEED = 0x08;
 
 // Guessed interrupt rates.  The real sources are still to be measured
 // (plan section 4); only the ratios matter for keeping timeouts quiet.
 static constexpr int DSP_IRQ1_HZ = 8000;    // ADC end-of-conversion / current loop
 static constexpr int DSP_IRQ2_HZ = 8000;    // supervision tick (heartbeat every 0x2000 ticks)
+
+
+// ------------------------------------------------------------------------
+//  Slot window state
+// ------------------------------------------------------------------------
+//  Every slot has a 4 KB dual-port window (2x MB8421 on the real board).
+//  Slot 1 is shared with the V810; slots 2/3 are kind-3 I/O boards; slots
+//  4/5 are empty.  The model is plain shared storage plus explicit mailbox
+//  IRQ bits, because the real mailbox addresses are the firmware-defined
+//  +0xFFC word rather than the MB8421 fixed last-two-word mailbox.
+struct slot_window
+{
+	uint8_t ram[0x1000];
+	uint8_t mailbox;
+	bool cpu_irq;           // SERVO -> CPU interrupt pending
+	bool servo_irq;         // CPU -> SERVO interrupt pending
+	uint16_t field_out;     // last output word written by the CPU
+	unsigned irq_asserts;
+	unsigned handshake_writes;
+	unsigned handshake_reads;
+	unsigned doorbell_writes;
+	unsigned output_writes;
+};
+
 
 
 // ------------------------------------------------------------------------
@@ -145,7 +209,6 @@ public:
 		, m_uart(*this, "uart%u", 0U)
 		, m_rs232(*this, "rs232_%u", 1U)
 		, m_rtc(*this, "rtc")
-		, m_slot_ram(*this, "slot_ram")
 		, m_eeprom_ram(*this, "eeprom_ram")
 	{
 	}
@@ -170,7 +233,6 @@ private:
 	required_device_array<i8251_device, 3> m_uart;
 	required_device_array<rs232_port_device, 3> m_rs232;
 	required_device<msm6242_device> m_rtc;
-	required_shared_ptr<uint32_t> m_slot_ram;
 	required_shared_ptr<uint32_t> m_eeprom_ram;
 
 	void maincpu_map(address_map &map);
@@ -208,6 +270,33 @@ private:
 	void pit_out1_w(int state);
 	void pit_out2_w(int state);
 	void blitter_stub_w(offs_t offset, uint8_t data);
+
+	// stage 5: slot windows, I/O boards, safety/field-I/O panel
+	uint32_t slot_r(int slot, offs_t offset, uint32_t mem_mask);
+	void slot_w(int slot, offs_t offset, uint32_t data, uint32_t mem_mask);
+	uint32_t slot1_r(offs_t offset, uint32_t mem_mask) { return slot_r(0, offset, mem_mask); }
+	void slot1_w(offs_t offset, uint32_t data, uint32_t mem_mask) { slot_w(0, offset, data, mem_mask); }
+	uint32_t slot2_r(offs_t offset, uint32_t mem_mask) { return slot_r(1, offset, mem_mask); }
+	void slot2_w(offs_t offset, uint32_t data, uint32_t mem_mask) { slot_w(1, offset, data, mem_mask); }
+	uint32_t slot3_r(offs_t offset, uint32_t mem_mask) { return slot_r(2, offset, mem_mask); }
+	void slot3_w(offs_t offset, uint32_t data, uint32_t mem_mask) { slot_w(2, offset, data, mem_mask); }
+	uint32_t slot4_r(offs_t offset, uint32_t mem_mask) { return slot_r(3, offset, mem_mask); }
+	void slot4_w(offs_t offset, uint32_t data, uint32_t mem_mask) { slot_w(3, offset, data, mem_mask); }
+	uint32_t slot5_r(offs_t offset, uint32_t mem_mask) { return slot_r(4, offset, mem_mask); }
+	void slot5_w(offs_t offset, uint32_t data, uint32_t mem_mask) { slot_w(4, offset, data, mem_mask); }
+
+	uint32_t servo_dpram_r(offs_t offset, uint32_t mem_mask);
+	void servo_dpram_w(offs_t offset, uint32_t data, uint32_t mem_mask);
+
+	uint8_t lua_io_r(offs_t offset);
+	void lua_io_w(offs_t offset, uint8_t data);
+	void safety_changed();
+
+	void slot_cpu_irq(int slot, bool state);
+	uint8_t slot_io_read_byte(int slot, offs_t offset);
+	void slot_io_write_byte(int slot, offs_t offset, uint8_t data);
+	void slot_dpram_write_byte(int slot, offs_t offset, uint8_t data);
+	uint8_t slot_dpram_read_byte(int slot, offs_t offset);
 
 	// 8251 access wrappers with a bounded transmit/control trace.
 	uint8_t uart_data_r(int ch);
@@ -248,6 +337,13 @@ private:
 	bool m_uart_initialized[3];
 	unsigned m_sys_input_reads[2];
 	emu_timer *m_cts_timer;
+
+	// stage 5: shared slot windows + safety/field I/O
+	slot_window m_slots[5];
+	uint8_t m_safety_faults;
+	uint16_t m_field_input;
+	unsigned m_safety_logs;
+	unsigned m_slot_dpram_irq_logs;
 
 	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
 	// logged; printable bytes are surfaced as console output.
@@ -321,7 +417,22 @@ void srx_c61_state::maincpu_map(address_map &map)
 	map(0x00000000, 0x001fffff).ram();                         // 2 MB SRAM at 0
 	map(0x00200000, 0x002fffff).rw(FUNC(srx_c61_state::pccard_r), FUNC(srx_c61_state::pccard_w)); // PC card window (empty: reads 0xFF)
 	map(0x00600000, 0x00601fff).ram().share(m_eeprom_ram);      // 8 KB EEPROM (RAM copy of the blank/optional image)
-	map(0x00700000, 0x0074ffff).ram().share(m_slot_ram);        // 5 slot DPRAM windows (64 KB each)
+
+	// Stage 5: slot windows.  The first 4 KB of each 64 KB window is the
+	// real dual-port RAM (2x MB8421); the rest of the window is unused stub
+	// space.  Slot 1 is the SERVO board (shares its RAM with the V810),
+	// slots 2/3 are kind-3 I/O boards, slots 4/5 are empty.
+	map(0x00700000, 0x00700fff).rw(FUNC(srx_c61_state::slot1_r), FUNC(srx_c61_state::slot1_w));
+	map(0x00701000, 0x0070ffff).ram();
+	map(0x00710000, 0x00710fff).rw(FUNC(srx_c61_state::slot2_r), FUNC(srx_c61_state::slot2_w));
+	map(0x00711000, 0x0071ffff).ram();
+	map(0x00720000, 0x00720fff).rw(FUNC(srx_c61_state::slot3_r), FUNC(srx_c61_state::slot3_w));
+	map(0x00721000, 0x0072ffff).ram();
+	map(0x00730000, 0x00730fff).rw(FUNC(srx_c61_state::slot4_r), FUNC(srx_c61_state::slot4_w));
+	map(0x00731000, 0x0073ffff).ram();
+	map(0x00740000, 0x00740fff).rw(FUNC(srx_c61_state::slot5_r), FUNC(srx_c61_state::slot5_w));
+	map(0x00741000, 0x0074ffff).ram();
+
 	map(0xffe00000, 0xffefffff).rom().region("maincpu", 0).w(FUNC(srx_c61_state::flash_w)); // 1 MB main flash (ROM1-C.bin), writes logged
 	map(0xffff8000, 0xffffffff).rom().region("boot", 0);       // 32 KB boot EPROM (reset vector)
 }
@@ -354,6 +465,16 @@ void srx_c61_state::maincpu_io_map(address_map &map)
 	map(0x00cc, 0x00cc).rw(FUNC(srx_c61_state::uart2_status_r), FUNC(srx_c61_state::uart2_ctrl_w));
 	map(0x00d0, 0x00d0).rw(FUNC(srx_c61_state::uart3_data_r),   FUNC(srx_c61_state::uart3_data_w));
 	map(0x00d4, 0x00d4).rw(FUNC(srx_c61_state::uart3_status_r), FUNC(srx_c61_state::uart3_ctrl_w));
+
+	// Stage 5: Lua fault-injection / field-I/O panel.  These ports are not
+	// used by the firmware (the highest decoded port is 0xD4).
+	//   0xF0 safety fault bits (0 = all clear; see SAFETY_* above)
+	//   0xF1/0xF2 field input word, low/high byte
+	//   0xF3/0xF4 last I/O-board output word, low/high byte (readback)
+	//   0xF5 SERVO DPRAM mailbox byte
+	//   0xF6 slot 1 IRQ pending (bit0 SERVO->CPU, bit1 CPU->SERVO)
+	//   0xF7 reserved
+	map(0x00f0, 0x00f7).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
 }
 
 // SERVO board (V810): ROM copied to RAM at 0 on boot.  gp = 0x2BAEC.
@@ -363,10 +484,11 @@ void srx_c61_state::servocpu_map(address_map &map)
 	map(0x00100000, 0x0013ffff).rom().region("servocpu", 0);   // 256 KB flash (ROM_SERVO.bin)
 	map(0xfffc0000, 0xffffffff).rom().region("servocpu", 0);   // reset alias (vector at 0xFFFFFFF0)
 
-	// Stage 1: slot dual-port RAM (firmware initialises it and polls 0x200004
-	// for the host handshake).  Modelled as plain RAM; the MB8421 mailboxes and
-	// the CPU-side window arrive in stage 5.
-	map(0x00200000, 0x00200fff).ram();
+	// Stage 5: slot dual-port RAM shared with the CPU board (slot 1 window
+	// at 0x700000).  The V810 firmware writes the header (+0/+1 = 0x0101),
+	// polls +0x04 for the host handshake and +0x10 for the doorbell, and
+	// writes the mailbox at +0xFFC.  See doc/servo_dsp_link.md section 1.
+	map(0x00200000, 0x00200fff).rw(FUNC(srx_c61_state::servo_dpram_r), FUNC(srx_c61_state::servo_dpram_w));
 
 	// Stage 1: on-board peripherals, modelled as register stubs so the monitor
 	// runs without faulting.  The 0x30000x block is the baud/SCI setup.
@@ -654,11 +776,13 @@ void srx_c61_state::pccard_attr_w(uint8_t data)
 // EPROM's FAT directory scan (0x89E0..0x8A53) checks for (0xFF = no card).
 uint8_t srx_c61_state::pccard_r(offs_t offset)
 {
+	offset <<= 2;                 // dword index -> byte offset
 	return 0xff;
 }
 
 void srx_c61_state::pccard_w(offs_t offset, uint8_t data)
 {
+	offset <<= 2;                 // dword index -> byte offset
 	if (m_pccard_writes++ < 8)
 		logerror("%s: PC card write 0x%06X <- 0x%02X (attribute=%d, no card)\n",
 				machine().describe_context(), 0x200000 + offset, data, m_pccard_attr ? 1 : 0);
@@ -688,22 +812,338 @@ void srx_c61_state::slot_latch_w(offs_t offset, uint8_t data)
 // parameter storage is the EEPROM/PC card, not the flash.
 void srx_c61_state::flash_w(offs_t offset, uint32_t data, uint32_t mem_mask)
 {
+	offset <<= 2;                 // dword index -> byte offset
 	if (m_flash_writes++ < 32)
 		logerror("%s: flash write 0xFFE%05X <- 0x%08X & 0x%08X\n",
 				machine().describe_context(), offset, data, mem_mask);
 }
 
+
+/***************************************************************************
+    Slot windows: shared SERVO DPRAM, I/O boards, safety panel (stage 5)
+***************************************************************************/
+
+uint8_t srx_c61_state::slot_dpram_read_byte(int slot, offs_t offset)
+{
+	return m_slots[slot].ram[offset & 0xfff];
+}
+
+void srx_c61_state::slot_dpram_write_byte(int slot, offs_t offset, uint8_t data)
+{
+	slot_window &s = m_slots[slot];
+	offset &= 0xfff;
+
+	if (offset == 0x0004 && s.handshake_writes < 8)
+	{
+		s.handshake_writes++;
+		logerror("%s: SRX DPRAM slot%d: handshake +0x04 <- 0x%02X\n",
+				machine().describe_context(), slot + 1, data);
+	}
+	if (offset == 0x0010 && s.doorbell_writes < 8)
+	{
+		s.doorbell_writes++;
+		logerror("%s: SRX DPRAM slot%d: doorbell +0x10 <- 0x%02X\n",
+				machine().describe_context(), slot + 1, data);
+	}
+
+	s.ram[offset] = data;
+}
+
+uint8_t srx_c61_state::slot_io_read_byte(int slot, offs_t offset)
+{
+	slot_window const &s = m_slots[slot];
+	unsigned const in_bytes = s.ram[0] & 0x0f;          // info low nibble  = input groups x8 / 8
+	unsigned const out_bytes = (s.ram[0] >> 4) & 0x0f;  // info high nibble = output groups x8 / 8
+
+	if (offset == 0)
+		return s.ram[0];
+	if (offset == 1)
+		return s.ram[1];                                // kind 3
+	if (offset == 2)
+		return s.ram[2];
+	if (offset >= 4 && offset < 4 + in_bytes)
+		return (m_field_input >> (8 * (offset - 4))) & 0xff;
+	if (offset >= 4 + in_bytes && offset < 4 + in_bytes + out_bytes)
+		return s.ram[offset];
+	return 0xff;
+}
+
+void srx_c61_state::slot_io_write_byte(int slot, offs_t offset, uint8_t data)
+{
+	slot_window &s = m_slots[slot];
+	unsigned const in_bytes = s.ram[0] & 0x0f;
+	unsigned const out_base = 4 + in_bytes;
+	unsigned const out_bytes = (s.ram[0] >> 4) & 0x0f;
+
+	if (offset == 0 || offset == 1)
+		return;                                         // info/kind are read-only
+	if (offset == 2)
+	{
+		s.ram[2] = data;                                // SYST writes 0xFF each scan
+		return;
+	}
+	if (offset >= out_base && offset < out_base + out_bytes)
+	{
+		uint16_t const old = s.field_out;
+		unsigned const bit = 8 * (offset - out_base);
+		s.ram[offset] = data;
+		s.field_out = (s.field_out & ~(uint16_t(0xff) << bit)) | (uint16_t(data) << bit);
+		if (old != s.field_out && s.output_writes < 16)
+		{
+			s.output_writes++;
+			logerror("SRX I/O slot%d: output word <- 0x%04X\n", slot + 1, s.field_out);
+		}
+		return;
+	}
+	s.ram[offset] = data;
+}
+
+void srx_c61_state::slot_cpu_irq(int slot, bool state)
+{
+	// Architecture report 4.3: slot 1 -> master IR4, slot 2 -> IR5,
+	// slot 3 -> IR6, slot 4 -> slave IR0, slot 5 -> slave IR1.
+	switch (slot)
+	{
+	case 0: m_pic_master->set_irq_line(4, state ? ASSERT_LINE : CLEAR_LINE); break;
+	case 1: m_pic_master->set_irq_line(5, state ? ASSERT_LINE : CLEAR_LINE); break;
+	case 2: m_pic_master->set_irq_line(6, state ? ASSERT_LINE : CLEAR_LINE); break;
+	case 3: m_pic_slave->set_irq_line(0, state ? ASSERT_LINE : CLEAR_LINE); break;
+	case 4: m_pic_slave->set_irq_line(1, state ? ASSERT_LINE : CLEAR_LINE); break;
+	default: break;
+	}
+}
+
+uint32_t srx_c61_state::slot_r(int slot, offs_t offset, uint32_t mem_mask)
+{
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset <<= 2;
+	uint32_t result = 0;
+	bool mailbox_read = false;
+
+
+	// i486 is little-endian: byte lane 0 is the low byte of `data`.
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		uint8_t value = 0xff;
+
+		if (byteaddr <= 0xfff)
+		{
+			if (slot == 0)
+			{
+				value = slot_dpram_read_byte(0, byteaddr);
+				if (byteaddr == 0xffc)
+					mailbox_read = true;
+				if (byteaddr == 0x0004 && m_slots[0].handshake_reads < 8)
+				{
+					m_slots[0].handshake_reads++;
+					logerror("%s: SRX DPRAM slot1: handshake +0x04 read -> 0x%02X\n",
+							machine().describe_context(), value);
+				}
+			}
+			else if (m_slots[slot].ram[1] == 3)
+				value = slot_io_read_byte(slot, byteaddr);
+		}
+
+		result |= uint32_t(value) << (8 * lane);
+	}
+
+	// Reading the mailbox word acknowledges the SERVO->CPU interrupt; this is
+	// exactly what the slot-1 ISR does (mov ax,[0x700FFC]).
+	if (mailbox_read && m_slots[0].cpu_irq)
+	{
+		m_slots[0].cpu_irq = false;
+		slot_cpu_irq(0, false);
+		if (m_slot_dpram_irq_logs++ < 16)
+			logerror("SRX DPRAM slot1: CPU read mailbox 0x%02X, IRQ acknowledged\n",
+					m_slots[0].ram[0xffc]);
+	}
+
+	return result;
+}
+
+void srx_c61_state::slot_w(int slot, offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset <<= 2;
+	bool mailbox_write = false;
+
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		uint8_t const byte = (data >> (8 * lane)) & 0xff;
+		if (byteaddr > 0xfff)
+			continue;
+
+		if (slot == 0)
+		{
+			slot_dpram_write_byte(0, byteaddr, byte);
+			if (byteaddr == 0xffc)
+				mailbox_write = true;
+		}
+		else if (m_slots[slot].ram[1] == 3)
+			slot_io_write_byte(slot, byteaddr, byte);
+	}
+
+	// A CPU write to the mailbox is a CPU->SERVO request.  The real V810
+	// interrupt line is unknown (plan 6.4); V810_DPRAM_IRQ documents the
+	// guess.  The CPU firmware normally only reads the mailbox.
+	if (mailbox_write)
+	{
+		m_slots[0].servo_irq = true;
+		m_servocpu->set_input_line(V810_DPRAM_IRQ, ASSERT_LINE);
+		if (m_slot_dpram_irq_logs++ < 16)
+			logerror("SRX DPRAM slot1: CPU wrote mailbox 0x%02X -> V810 IRQ %d\n",
+					m_slots[0].ram[0xffc], V810_DPRAM_IRQ);
+	}
+}
+
+// V810 side of slot 1.  The V810 is big-endian, so lane 0 is the high byte.
+uint32_t srx_c61_state::servo_dpram_r(offs_t offset, uint32_t mem_mask)
+{
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset <<= 2;
+	uint32_t result = 0;
+	bool mailbox_read = false;
+
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		uint8_t value = 0xff;
+		if (byteaddr <= 0xfff)
+		{
+			value = slot_dpram_read_byte(0, byteaddr);
+			if (byteaddr == 0xffc)
+				mailbox_read = true;
+		}
+		result |= uint32_t(value) << (8 * lane);
+	}
+
+
+	if (mailbox_read && m_slots[0].servo_irq)
+	{
+		m_slots[0].servo_irq = false;
+		m_servocpu->set_input_line(V810_DPRAM_IRQ, CLEAR_LINE);
+		if (m_slot_dpram_irq_logs++ < 16)
+			logerror("SRX DPRAM slot1: V810 read mailbox 0x%02X, IRQ acknowledged\n",
+					m_slots[0].ram[0xffc]);
+	}
+
+	return result;
+}
+
+void srx_c61_state::servo_dpram_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset <<= 2;
+	bool mailbox_write = false;
+
+
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		uint8_t const byte = (data >> (8 * lane)) & 0xff;
+		if (byteaddr > 0xfff)
+			continue;
+
+		slot_dpram_write_byte(0, byteaddr, byte);
+		if (byteaddr == 0xffc)
+			mailbox_write = true;
+	}
+
+	// The SERVO writes +0xFFC to interrupt the CPU (value 1/2/4 in the
+	// firmware: request / timeout / ack, see doc/servo_dsp_link.md).
+	if (mailbox_write)
+	{
+		m_slots[0].cpu_irq = true;
+		slot_cpu_irq(0, true);
+		m_slots[0].irq_asserts++;
+		if (m_slots[0].irq_asserts <= 16 || (m_slots[0].irq_asserts % 500) == 0)
+			logerror("SRX DPRAM slot1: SERVO mailbox 0x%02X -> CPU IRQ (%u)\n",
+					m_slots[0].ram[0xffc], m_slots[0].irq_asserts);
+	}
+}
+
+// ---- Lua safety / field-I/O panel ----------------------------------------
+uint8_t srx_c61_state::lua_io_r(offs_t offset)
+{
+	slot_window const &s = m_slots[0];
+	switch (offset & 7)
+	{
+	case 0: return m_safety_faults;
+	case 1: return m_field_input & 0xff;
+	case 2: return (m_field_input >> 8) & 0xff;
+	case 3: return m_slots[1].field_out & 0xff;
+	case 4: return (m_slots[1].field_out >> 8) & 0xff;
+	case 5: return s.ram[0xffc];
+	case 6: return (s.cpu_irq ? 0x01 : 0x00) | (s.servo_irq ? 0x02 : 0x00);
+	default: return 0;
+	}
+}
+
+void srx_c61_state::lua_io_w(offs_t offset, uint8_t data)
+{
+	uint8_t old_faults = m_safety_faults;
+	switch (offset & 7)
+	{
+	case 0: m_safety_faults = data & 0x0f; break;
+	case 1: m_field_input = (m_field_input & 0xff00) | data; break;
+	case 2: m_field_input = (m_field_input & 0x00ff) | (uint16_t(data) << 8); break;
+	default: break;                                     // readback/reserved registers
+	}
+	if (old_faults != m_safety_faults)
+		safety_changed();
+}
+
+void srx_c61_state::safety_changed()
+{
+	if (m_safety_logs++ < 32)
+		logerror("SRX SAFETY: faults 0x%02X (estop=%d dss_off=%d amprdy=%d overspeed=%d)\n",
+				m_safety_faults,
+				(m_safety_faults & SAFETY_ESTOP) ? 1 : 0,
+				(m_safety_faults & SAFETY_DSS_OFF) ? 1 : 0,
+				(m_safety_faults & SAFETY_AMPRDY) ? 1 : 0,
+				(m_safety_faults & SAFETY_OVERSPEED) ? 1 : 0);
+
+	// The DSP FLAG_IN input is the amplifier-ready/safety level.  Keep the
+	// default (all clear) behaviour of stage 2/3; a fault drops it.
+	bool const clear = (m_safety_faults == 0);
+	dsp_set_flag_in(0, clear ? 1 : 0);
+	dsp_set_flag_in(1, clear ? 1 : 0);
+}
+
+
 // Stage 1: the SERVO 0x30000x block is the baud/SCI setup (observed command
 // values 0x30/0x74/0xB4 and a 16-bit divisor).  The monitor does not emit its
 // banner standalone: it idles polling slot DPRAM 0x200004 for the host
-// handshake, so the console becomes useful once the CPU side exists (stage 5).
+// handshake, which stage 5 now supplies from the CPU side.  The SERVO-board
+// safety inputs themselves are not identified yet (plan 5.7/6.12): the
+// V810 only sees the safety chain through the DSP status/FLAG_IN path.
 uint32_t srx_c61_state::servo_console_r(offs_t offset)
 {
+	offset <<= 2;                 // dword index -> byte offset
 	return 0;
 }
 
 void srx_c61_state::servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask)
 {
+	offset <<= 2;                 // dword index -> byte offset
 	for (int shift = 0; shift < 32; shift += 8)
 	{
 		uint8_t const byte = (data >> shift) & 0xff;
@@ -725,12 +1165,13 @@ void srx_c61_state::servo_console_w(offs_t offset, uint32_t data, uint32_t mem_m
 // immediately visible to the V810 polling the command word.
 uint32_t srx_c61_state::servo_dsp_window_r(offs_t offset, uint32_t mem_mask)
 {
-	offset &= 0x00ff;
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset = (offset << 2) & 0x00ff;
 	uint32_t result = 0;
 
 	for (int lane = 0; lane < 4; lane++)
 	{
-		uint32_t const mask = 0xffu << (24 - 8 * lane);
+		uint32_t const mask = 0xffu << (8 * lane);
 		if (!(mem_mask & mask))
 			continue;
 
@@ -738,8 +1179,8 @@ uint32_t srx_c61_state::servo_dsp_window_r(offs_t offset, uint32_t mem_mask)
 		int const which = (byteaddr & 0x80) ? 1 : 0;
 		offs_t const reg = (byteaddr & 0x7f) >> 1;
 		uint16_t const value = dsp_cxd_r(which, reg);
-		uint8_t const byte = (byteaddr & 1) ? uint8_t(value & 0xff) : uint8_t(value >> 8);
-		result |= uint32_t(byte) << (24 - 8 * lane);
+		uint8_t const byte = (byteaddr & 1) ? uint8_t(value >> 8) : uint8_t(value & 0xff);
+		result |= uint32_t(byte) << (8 * lane);
 	}
 
 	return result;
@@ -747,7 +1188,8 @@ uint32_t srx_c61_state::servo_dsp_window_r(offs_t offset, uint32_t mem_mask)
 
 void srx_c61_state::servo_dsp_window_w(offs_t offset, uint32_t data, uint32_t mem_mask)
 {
-	offset &= 0x00ff;
+	// The 32-bit program space passes dword indices, not byte offsets.
+	offset = (offset << 2) & 0x00ff;
 
 	// Collect the touched registers first, then run the normal CXD8501R write
 	// handler once per register so its side effects (mailbox ack logging,
@@ -759,14 +1201,14 @@ void srx_c61_state::servo_dsp_window_w(offs_t offset, uint32_t data, uint32_t me
 
 	for (int lane = 0; lane < 4; lane++)
 	{
-		uint32_t const mask = 0xffu << (24 - 8 * lane);
+		uint32_t const mask = 0xffu << (8 * lane);
 		if (!(mem_mask & mask))
 			continue;
 
 		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
 		int const which = (byteaddr & 0x80) ? 1 : 0;
 		offs_t const reg = (byteaddr & 0x7f) >> 1;
-		uint8_t const byte = (data >> (24 - 8 * lane)) & 0xff;
+		uint8_t const byte = (data >> (8 * lane)) & 0xff;
 
 		int entry = -1;
 		for (int i = 0; i < n; i++)
@@ -786,9 +1228,9 @@ void srx_c61_state::servo_dsp_window_w(offs_t offset, uint32_t data, uint32_t me
 		}
 
 		if (byteaddr & 1)
-			touched_value[entry] = (touched_value[entry] & 0xff00) | byte;
-		else
 			touched_value[entry] = (touched_value[entry] & 0x00ff) | (uint16_t(byte) << 8);
+		else
+			touched_value[entry] = (touched_value[entry] & 0xff00) | byte;
 	}
 
 	for (int i = 0; i < n; i++)
@@ -867,7 +1309,21 @@ void srx_c61_state::dsp_boot_page(int which, int page)
 // CXD8501R register file.  Offsets are relative to DM 0x3000.
 uint16_t srx_c61_state::dsp_cxd_r(int which, offs_t offset)
 {
-	return m_cxd[which].regs[offset & 0x3f];
+	offset &= 0x3f;
+	uint16_t value = m_cxd[which].regs[offset];
+
+	// Stage 5 fault injection: the mapping of the safety signals onto the
+	// CXD8501R status word is not decoded yet (plan 5.4/5.7), so only add
+	// the bits when a fault is active.  All-clear returns the stored value
+	// unchanged, which keeps the stage-2/3 command handshake intact.
+	if (m_safety_faults != 0)
+	{
+		if (offset == 0x0021)
+			value |= 0x0200;                            // [H] amplifier fault
+		else if (offset == 0x003f)
+			value |= 0x003c;                            // [H] status bits 2-5 (plan 5.4)
+	}
+	return value;
 }
 
 void srx_c61_state::dsp_cxd_w(int which, offs_t offset, uint16_t data)
@@ -982,7 +1438,7 @@ void srx_c61_state::dsp_irq2_tick(int which)
 	// Re-assert the safety-chain input every supervision tick: a core reset
 	// (BFORCE) clears the FLAG_IN register, and this is the input the IRQ2
 	// handler evaluates before it latches the requested motor mode.
-	dsp_set_flag_in(which, 1);
+	dsp_set_flag_in(which, (m_safety_faults == 0) ? 1 : 0);
 	dsp_set_line(which, ADSP2115_IRQ2, ASSERT_LINE);
 	m_irq_clear_timer[which]->adjust(attotime::from_usec(2), which);
 }
@@ -1015,7 +1471,7 @@ void srx_c61_state::dsp_selftest(int step)
 		int const prev = step - 1;
 		for (int which = 0; which < 2; which++)
 		{
-			uint16_t const ack = uint16_t(servo_dsp_window_r(window[which], 0xffff0000) >> 16);
+			uint16_t const ack = uint16_t(servo_dsp_window_r(window[which], 0x0000ffff) & 0xffff);
 			logerror("Stage-3 window self-test: DSP%d %s ack=%04X (%s)\n",
 					which + 1, names[prev], ack, ack == 0 ? "ACKED" : "NOT ACKED");
 		}
@@ -1027,7 +1483,7 @@ void srx_c61_state::dsp_selftest(int step)
 		{
 			logerror("Stage-3 window self-test: DSP%d <- %s via window 0x40%04X\n",
 					which + 1, names[step], 0x0000 + window[which]);
-			servo_dsp_window_w(window[which], uint32_t(commands[step]) << 16, 0xffff0000);
+			servo_dsp_window_w(window[which], uint32_t(commands[step]), 0x0000ffff);
 		}
 		m_selftest_timer->adjust(attotime::from_msec(200), step + 1);
 	}
@@ -1150,8 +1606,7 @@ void srx_c61_state::machine_start()
 	m_irq2_timer[0]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 0, attotime::from_hz(DSP_IRQ2_HZ));
 	m_irq2_timer[1]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 1, attotime::from_hz(DSP_IRQ2_HZ));
 
-	// ---- stage 4: CPU-board state ----
-
+	// ---- stage 5: slot windows, I/O boards, safety panel ----
 	std::fill(std::begin(m_slot_latch), std::end(m_slot_latch), 0);
 	std::fill(std::begin(m_slot_latch_writes), std::end(m_slot_latch_writes), 0);
 	m_pccard_attr = false;
@@ -1169,18 +1624,45 @@ void srx_c61_state::machine_start()
 	// Slot DPRAM header bytes (plan 5.2, architecture report 8.4): info at
 	// +0, kind at +1.  Population guess of the owner's unit: one SERVO board
 	// (kind 1) and two I/O boards (kind 3) in slots 1-3, slots 4/5 empty.
-	// Slot order is unconfirmed (plan 6.13), so keep this in one place.
-	// The shared RAM is 32-bit (the i486 program space is 32-bit wide), so
-	// address it as bytes through a cast.
-	uint8_t *slot = reinterpret_cast<uint8_t *>(&m_slot_ram[0]);
-	slot[0x00000] = 0x00;           // slot 1: servo board info byte
-	slot[0x00001] = 0x01;           // slot 1: kind 1 = servo
-	slot[0x10000] = 0x22;           // slot 2: I/O board, 2 in / 2 out groups
-	slot[0x10001] = 0x03;           // slot 2: kind 3 = I/O
-	slot[0x20000] = 0x22;           // slot 3: I/O board
-	slot[0x20001] = 0x03;
-	slot[0x30001] = 0x00;           // slot 4: empty
-	slot[0x40001] = 0x00;           // slot 5: empty
+	// Slot order is unconfirmed (plan 6.13).  The V810 writes its own header
+	// at boot; these values are the CPU-side fallback so discovery never sees
+	// an empty slot 1 before the SERVO has started.
+	for (int i = 0; i < 5; i++)
+	{
+		slot_window &s = m_slots[i];
+		std::fill(std::begin(s.ram), std::end(s.ram), 0);
+		s.mailbox = 0;
+		s.cpu_irq = false;
+		s.servo_irq = false;
+		s.field_out = 0;
+		s.irq_asserts = 0;
+		s.handshake_writes = 0;
+		s.handshake_reads = 0;
+		s.doorbell_writes = 0;
+		s.output_writes = 0;
+	}
+
+	m_slots[0].ram[0x001] = 0x01;           // slot 1: servo board
+	m_slots[1].ram[0x000] = 0x22;           // slot 2: I/O board, 2 in / 2 out groups
+	m_slots[1].ram[0x001] = 0x03;
+	m_slots[2].ram[0x000] = 0x22;           // slot 3: I/O board
+	m_slots[2].ram[0x001] = 0x03;
+	m_slots[3].ram[0x001] = 0x00;           // slot 4: empty
+	m_slots[4].ram[0x001] = 0x00;           // slot 5: empty
+
+	// 8-byte ROM version string read from slot 1 at +0xF00 by 0x897C for the
+	// "SRV ROM" screen.  The V810 copies the real string here at boot; this
+	// is only a fallback for the pre-SERVO window.
+	static constexpr char servo_version[8] = { 'S','R','X','6','-','S','V',0 };
+	std::memcpy(&m_slots[0].ram[0xf00], servo_version, sizeof(servo_version));
+
+	// Safety chain defaults: everything clear.  Field input word 0 bit 6 is
+	// the DSS input (1 = DSS on; E401 fires when it is 0, see error_401 doc).
+	m_safety_faults = 0;
+	m_field_input = 0x0040;
+	m_safety_logs = 0;
+	m_slot_dpram_irq_logs = 0;
+	safety_changed();
 
 	// EEPROM: copy the optional image (or the 0xFF fill from ROM_FILL) into
 	// the writable RAM copy.  The real chip contents are the plan 6.1 P1
