@@ -1,0 +1,10 @@
+.git
+*.i64
+*.id0
+*.id1
+*.nam
+*.til
+*.log
+build.sh
+make_roms.sh
+README.md
