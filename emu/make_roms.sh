@@ -15,6 +15,7 @@ cp "$REPO_ROOT/FW/SRX6-CPU/2/U23_M27C256B@DIP28.BIN"   "$DST/u23_eprom.bin"
 cp "$REPO_ROOT/FW/SRX6-SERVO/ROM_SERVO.bin"             "$DST/rom_servo.bin"
 cp "$REPO_ROOT/FW/SERVO_IO/1/U7_M27C512@DIP28.BIN"      "$DST/u7_dsp.bin"
 cp "$REPO_ROOT/FW/SERVO_IO/1/U18_M27C512@DIP28.BIN"     "$DST/u18_dsp.bin"
+cp "$REPO_ROOT/FW/TP/IC6_M27C256B@DIP28.BIN"            "$DST/tp.bin"
 
 # CPU-board 8 KB EEPROM.  The real contents are not available (plan 6.1,
 # P1 blocker), so create a blank erased-state (0xFF) image on first run.

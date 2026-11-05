@@ -83,6 +83,20 @@
       - Whether the firmware actually *raises* the error is a separate
         question; see the stage 6 test and doc/emulator_plan.md section 8.
 
+    Stage 7: the real teach pendant.
+      - A Z180 (HD64180-compatible Z80180) runs the TP EPROM from 0 with 32 KB
+        of RAM at 0x8000.  Its ASCI channel 0 is wired directly to the CPU
+        board's ch1 8251A, so the two real firmwares perform the
+        "SRX6" <-> "TP4" handshake themselves (the pty card on ch1 stays
+        available as an optional monitor/injection peer).
+      - External I/O 0x80-0x83 models the key matrix/panel latch and
+        0xC0/0xC1 a 20x4 HD44780-compatible character LCD.  The 20-character
+        lines are logged when they change and can be read from Lua through
+        CPU I/O ports 0xFA/0xFB; keys are injected through 0xF8/0xF9.
+      - Unknowns from doc/TP_firmware_structure.md are modelled only as far
+        as the firmware needs; the LCD type and the exact key matrix are
+        inferred, not confirmed on hardware (see the report).
+
     Stage 4: CPU-board peripherals.
       - 3x 8251A: ch1 0xC0/C4 teach pendant, ch2 0xC8/CC PC host,
         ch3 0xD0/D4 user RS-232C.  Each has an rs232_port slot whose default
@@ -124,6 +138,7 @@
 #include "cpu/i386/i386.h"
 #include "cpu/v810/v810.h"
 #include "cpu/adsp2100/adsp2100.h"
+#include "cpu/z180/z180.h"
 
 #include "bus/rs232/rs232.h"
 #include "machine/i8251.h"
@@ -136,6 +151,81 @@
 #include <algorithm>
 #include <iterator>
 
+
+// The pendant controller is a Hitachi HD64180, which MAME models as the
+// Z80180.  The TP firmware programs CNTLB0 = 0x07 (SS = 111); MAME's Z180
+// treats SS = 111 as "external clock", which would leave the ASCI without a bit
+// rate.  The firmware clearly expects a 9600 8N2 link (the CPU board's 8251A
+// runs at 9600), so translate that one write to SS = 001:
+// MAME's ASCI clock is CPU/2 = 3.072 MHz, giving 9600 baud with
+// 3.072 MHz / (2*10) / 16.  This is a model assumption [H], not a hardware-confirmed
+// register value; it does not change any other internal register access.
+class srx_tp_z180_device : public z80180_device
+{
+public:
+	srx_tp_z180_device(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock)
+		: z80180_device(mconfig, tag, owner, clock)
+		, m_tp_rx_log(0)
+		, m_tp_tx_log(0)
+		, m_tp_tx_hist(0)
+		, m_tp_handshake(false)
+	{
+	}
+
+protected:
+	virtual uint8_t z180_internal_port_read(uint8_t port) override
+	{
+		uint8_t data = z80180_device::z180_internal_port_read(port);
+		// The TP's DCD0 input is not connected in this model (there is no
+		// modem-control line in the pendant cable), but MAME's ASCI leaves the
+		// DCD0 status bit uninitialised/reset-preserved at 1, which would trap
+		// the firmware in its boot wait loop at 0x0114 and make ISR B ignore
+		// received bytes.  Force it clear.
+		if (port == 0x04)
+			data &= ~0x04;
+		if (port == 0x08 && m_tp_rx_log++ < 32)
+			logerror("SRX TP ASCI RX byte 0x%02X (%c)\n", data,
+					(data >= 0x20 && data < 0x7f) ? char(data) : '.');
+		return data;
+	}
+
+	virtual void z180_internal_port_write(uint8_t port, uint8_t data) override
+	{
+		if (port == 0x06)
+		{
+			if (m_tp_tx_log++ < 32)
+				logerror("SRX TP ASCI TX byte 0x%02X (%c)\n", data,
+						(data >= 0x20 && data < 0x7f) ? char(data) : '.');
+			// Detect the identity reply 1B 07 01 00 'T' 'P' '4'.
+			m_tp_tx_hist = (m_tp_tx_hist << 8) | data;
+			if ((m_tp_tx_hist & 0x00ffffffffffffffULL) == 0x001b070100545034ULL
+					&& !m_tp_handshake)
+			{
+				m_tp_handshake = true;
+				logerror("SRX TP: TP4 handshake reply sent by the pendant firmware\n");
+			}
+		}
+		if (port == 0x02)
+		{
+			if (data == 0x07)
+				data = 0x01;
+			logerror("SRX TP: ASCI CNTLB0 <- 0x%02X (9600 8N2 model)\n", data);
+		}
+		z80180_device::z180_internal_port_write(port, data);
+	}
+
+public:
+	bool handshake_seen() const { return m_tp_handshake; }
+
+private:
+	unsigned m_tp_rx_log;
+	unsigned m_tp_tx_log;
+	uint64_t m_tp_tx_hist;
+	bool m_tp_handshake;
+};
+
+DECLARE_DEVICE_TYPE(SRX_TP_Z180, srx_tp_z180_device)
+DEFINE_DEVICE_TYPE(SRX_TP_Z180, srx_tp_z180_device, "srx_tp_z180", "Sony SRX-611 teach pendant (HD64180/Z180)")
 
 namespace {
 
@@ -237,6 +327,7 @@ public:
 		, m_servocpu(*this, "servocpu")
 		, m_dsp1(*this, "dsp1")
 		, m_dsp2(*this, "dsp2")
+		, m_tp(*this, "tp")
 		, m_dsp1_pm(*this, "dsp1_pm")
 		, m_dsp2_pm(*this, "dsp2_pm")
 		, m_pit(*this, "pit")
@@ -259,6 +350,7 @@ private:
 	required_device<v810_device> m_servocpu;
 	required_device<adsp2115_device> m_dsp1;
 	required_device<adsp2115_device> m_dsp2;
+	required_device<srx_tp_z180_device> m_tp;
 	required_shared_ptr<uint32_t> m_dsp1_pm;
 	required_shared_ptr<uint32_t> m_dsp2_pm;
 
@@ -278,6 +370,8 @@ private:
 	void dsp1_data_map(address_map &map);
 	void dsp2_program_map(address_map &map);
 	void dsp2_data_map(address_map &map);
+	void tp_program_map(address_map &map);
+	void tp_io_map(address_map &map);
 
 	uint8_t diag_io_r();
 	void diag_io_w(uint8_t data);
@@ -362,6 +456,23 @@ private:
 	void uart1_rxrdy_w(int state) { uart_rxrdy_w(0, state); }
 	void uart2_rxrdy_w(int state) { uart_rxrdy_w(1, state); }
 	void uart3_rxrdy_w(int state) { uart_rxrdy_w(2, state); }
+	void uart1_txd_w(int state);
+	void tp_status_check(int unused);
+
+	// stage 7: teach pendant (Z180 + key matrix + character LCD)
+	uint8_t tp_port80_r();
+	void tp_port80_w(uint8_t data);
+	uint8_t tp_port81_r();
+	uint8_t tp_port82_r();
+	void tp_port82_w(uint8_t data);
+	uint8_t tp_port83_r();
+	void tp_port83_w(uint8_t data);
+	uint8_t tp_lcd_status_r();
+	void tp_lcd_cmd_w(uint8_t data);
+	uint8_t tp_lcd_data_r();
+	void tp_lcd_data_w(uint8_t data);
+	int tp_lcd_index(uint8_t addr) const;
+	void tp_display_changed();
 
 	uint8_t m_slot_latch[5];
 	bool m_pccard_attr;
@@ -375,6 +486,7 @@ private:
 	bool m_uart_initialized[3];
 	unsigned m_sys_input_reads[2];
 	emu_timer *m_cts_timer;
+	emu_timer *m_tp_status_timer;
 
 	// stage 5: shared slot windows + safety/field I/O
 	slot_window m_slots[5];
@@ -385,6 +497,20 @@ private:
 	unsigned m_slot_dpram_irq_logs;
 	unsigned m_adc_offset_logs;
 	unsigned m_servo_status_logs;
+
+	// stage 7: teach pendant state
+	uint8_t m_tp_display[80];           // 4 lines x 20 characters, line-major
+	char m_tp_display_last[4][21];
+	uint8_t m_tp_cursor;
+	bool m_tp_entry_increment;
+	bool m_tp_display_on;
+	uint8_t m_tp_port80;
+	uint8_t m_tp_port82;
+	uint8_t m_tp_port83;
+	uint8_t m_tp_keys[7];               // bit set = key pressed in that column
+	uint8_t m_tp_key_col;
+	uint8_t m_tp_display_index;
+	unsigned m_tp_key_scan_logs;
 
 	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
 	// logged; printable bytes are surfaced as console output.
@@ -515,7 +641,11 @@ void srx_c61_state::maincpu_io_map(address_map &map)
 	//   0xF5 SERVO DPRAM mailbox byte
 	//   0xF6 slot 1 IRQ pending (bit0 SERVO->CPU, bit1 CPU->SERVO)
 	//   0xF7 ADC offset, signed 8-bit (added to every AD7874 channel)
-	map(0x00f0, 0x00f7).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
+	//   0xF8 TP key column select (0-6)
+	//   0xF9 TP key rows for that column (bit set = pressed)
+	//   0xFA TP display read index (0-79, line-major)
+	//   0xFB TP display character at the index; reads auto-increment
+	map(0x00f0, 0x00fb).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
 }
 
 // SERVO board (V810): ROM copied to RAM at 0 on boot.  gp = 0x2BAEC.
@@ -589,6 +719,37 @@ void srx_c61_state::dsp2_data_map(address_map &map)
 	map(0x3800, 0x39ff).ram();
 	map(0x3fe0, 0x3ffe).ram();
 	map(0x3fff, 0x3fff).rw(FUNC(srx_c61_state::dsp2_syscntl_r), FUNC(srx_c61_state::dsp2_syscntl_w));
+}
+
+
+// Teach pendant (Z180): 32 KB EPROM at 0, 32 KB RAM at 0x8000.  The EPROM
+// image is used only up to 0x205A, the rest is 0xFF.
+void srx_c61_state::tp_program_map(address_map &map)
+{
+	map(0x0000, 0x7fff).rom().region("tp", 0);
+	map(0x8000, 0xffff).ram();
+}
+
+// Pendant external I/O.  The HD64180 keeps 0x00-0x3F internal (ASCI, timers,
+// interrupts), so everything here is decoded off-chip.  Port roles are from the
+// firmware (doc/TP_firmware_structure.md section 8.2 and the driver's trace):
+//   0x80 W key-matrix column select (bits 0-2) + panel outputs; R status/DIP
+//   0x81 R key-matrix rows, active low, for the selected column
+//   0x82 W panel latch (LEDs/buzzer); R read-back
+//   0x83 W panel init value (0x8A at boot); R read-back
+//   0xC0 W HD44780 command; R status (bit 7 = busy, always 0 here)
+//   0xC1 W HD44780 data;    R data (unused by the firmware)
+void srx_c61_state::tp_io_map(address_map &map)
+{
+	// MAME's Z180 performs a dummy external access for internal ports so a
+	// mixed internal/external decode still sees the bus; swallow it silently.
+	map(0x0000, 0x007f).noprw();
+	map(0x0080, 0x0080).rw(FUNC(srx_c61_state::tp_port80_r), FUNC(srx_c61_state::tp_port80_w));
+	map(0x0081, 0x0081).r(FUNC(srx_c61_state::tp_port81_r));
+	map(0x0082, 0x0082).rw(FUNC(srx_c61_state::tp_port82_r), FUNC(srx_c61_state::tp_port82_w));
+	map(0x0083, 0x0083).rw(FUNC(srx_c61_state::tp_port83_r), FUNC(srx_c61_state::tp_port83_w));
+	map(0x00c0, 0x00c0).rw(FUNC(srx_c61_state::tp_lcd_status_r), FUNC(srx_c61_state::tp_lcd_cmd_w));
+	map(0x00c1, 0x00c1).rw(FUNC(srx_c61_state::tp_lcd_data_r), FUNC(srx_c61_state::tp_lcd_data_w));
 }
 
 
@@ -733,6 +894,177 @@ void srx_c61_state::uart_rxrdy_w(int ch, int state)
 {
 	m_pic_master->set_irq_line(1 + ch, state);
 }
+
+// CPU ch1 TXD reaches both the optional pty peer and the real pendant's
+// ASCI receiver.  The pendant is the normal peer in the whole-system config;
+// the pty stays available for monitor/injection work.
+void srx_c61_state::uart1_txd_w(int state)
+{
+	m_rs232[0]->write_txd(state);
+	m_tp->rxa0_w(state);
+}
+
+
+/***************************************************************************
+    Teach pendant (stage 7)
+***************************************************************************/
+
+uint8_t srx_c61_state::tp_port80_r()
+{
+	// The key scan reads this port, preserves bits 7-3 and writes it back with
+	// a new column number.  Bits 7-3 are panel/DIP inputs whose pin-out is not
+	// documented; returning the last written value is the least surprising
+	// model and keeps the scan loop's own state stable.
+	return m_tp_port80;
+}
+
+void srx_c61_state::tp_port80_w(uint8_t data)
+{
+	m_tp_port80 = data;
+}
+
+uint8_t srx_c61_state::tp_port81_r()
+{
+	// Key matrix rows are active low: a cleared bit is a pressed key.
+	unsigned const col = m_tp_port80 & 7;
+	if (m_tp_keys[col] && m_tp_key_scan_logs++ < 16)
+		logerror("SRX TP keypad scan: column %u rows 0x%02X\n", col, uint8_t(~m_tp_keys[col]));
+	return uint8_t(~m_tp_keys[col]);
+}
+
+uint8_t srx_c61_state::tp_port82_r()
+{
+	return m_tp_port82;
+}
+
+void srx_c61_state::tp_port82_w(uint8_t data)
+{
+	m_tp_port82 = data;
+}
+
+uint8_t srx_c61_state::tp_port83_r()
+{
+	return m_tp_port83;
+}
+
+void srx_c61_state::tp_port83_w(uint8_t data)
+{
+	m_tp_port83 = data;
+}
+
+// HD44780-style 20x4 character LCD.  The firmware uses the standard line
+// base addresses 0x00/0x40/0x14/0x54 (see 0x0D2B in the TP image), so map
+// DDRAM addresses onto four line-major rows.
+int srx_c61_state::tp_lcd_index(uint8_t addr) const
+{
+	addr &= 0x7f;
+	if (addr <= 0x13)
+		return addr;
+	if (addr >= 0x40 && addr <= 0x53)
+		return 20 + (addr - 0x40);
+	if (addr >= 0x14 && addr <= 0x33)
+		return 40 + (addr - 0x14);
+	if (addr >= 0x54 && addr <= 0x73)
+		return 60 + (addr - 0x54);
+	return -1;
+}
+
+void srx_c61_state::tp_display_changed()
+{
+	for (int line = 0; line < 4; line++)
+	{
+		char text[21];
+		std::memcpy(text, &m_tp_display[line * 20], 20);
+		text[20] = '\0';
+		if (std::memcmp(text, m_tp_display_last[line], 21) != 0)
+		{
+			std::memcpy(m_tp_display_last[line], text, 21);
+			logerror("SRX TP display L%d: \"%s\"\n", line + 1, text);
+		}
+	}
+}
+
+uint8_t srx_c61_state::tp_lcd_status_r()
+{
+	// Bit 7 is the busy flag.  The model is always ready; the firmware's only
+	// status use is polling this bit before a command/data write.
+	return uint8_t(m_tp_cursor & 0x7f);
+}
+
+void srx_c61_state::tp_lcd_cmd_w(uint8_t data)
+{
+	if (data & 0x80)
+	{
+		m_tp_cursor = data & 0x7f;
+		return;
+	}
+
+	if (data & 0x40)
+		return;                         // set CGRAM address (not modelled)
+
+	if (data & 0x20)
+		return;                         // function set (8-bit, lines, font)
+
+	if (data & 0x10)
+		return;                         // cursor/display shift
+
+	if (data & 0x08)
+	{
+		m_tp_display_on = BIT(data, 2);
+		return;                         // display/cursor on-off control
+	}
+	if (data & 0x04)
+	{
+		m_tp_entry_increment = BIT(data, 1);   // I/D: 1 = increment, 0 = decrement
+		return;                         // entry mode set
+	}
+	if (data & 0x02)
+	{
+		m_tp_cursor = 0;
+		return;                         // return home
+	}
+	if (data & 0x01)
+	{
+		std::fill(std::begin(m_tp_display), std::end(m_tp_display), uint8_t(' '));
+		m_tp_cursor = 0;
+		tp_display_changed();
+	}
+}
+
+uint8_t srx_c61_state::tp_lcd_data_r()
+{
+	int const index = tp_lcd_index(m_tp_cursor);
+	return (index >= 0) ? m_tp_display[index] : 0x20;
+}
+
+void srx_c61_state::tp_lcd_data_w(uint8_t data)
+{
+	int const index = tp_lcd_index(m_tp_cursor);
+	if (index >= 0)
+		m_tp_display[index] = data;
+	m_tp_cursor = uint8_t(m_tp_cursor + (m_tp_entry_increment ? 1 : -1)) & 0x7f;
+	tp_display_changed();
+}
+
+// One-shot progress probe: report what the real pendant firmware has in its
+// protocol RX buffer 0x8279 (length at +1, command at +2, payload +3..) and
+// its status latch 0x8392.  This is the same evidence a serial trace gives,
+// without touching the firmware.
+void srx_c61_state::tp_status_check(int unused)
+{
+	address_space &prog = m_tp->space(AS_PROGRAM);
+	uint8_t const status = prog.read_byte(0x8392);
+	logerror("SRX TP: probe PC=0x%04X buffer %02X %02X %02X %02X %02X %02X %02X status 0x%02X\n",
+			m_tp->state_int(Z180_PC),
+			prog.read_byte(0x8279), prog.read_byte(0x827a), prog.read_byte(0x827b),
+			prog.read_byte(0x827c), prog.read_byte(0x827d), prog.read_byte(0x827e),
+			prog.read_byte(0x827f), status);
+	if (m_tp->handshake_seen())
+		logerror("SRX TP: handshake PASSED between real firmwares (SRX6 received, TP4 sent)\n");
+	else
+		logerror("SRX TP: no TP4 reply observed by the probe time\n");
+}
+
 
 // ---- 8259A ----------------------------------------------------------------
 // Even port = command/status, next even port (stride 4) = data.
@@ -1130,7 +1462,7 @@ void srx_c61_state::servo_dpram_w(offs_t offset, uint32_t data, uint32_t mem_mas
 uint8_t srx_c61_state::lua_io_r(offs_t offset)
 {
 	slot_window const &s = m_slots[0];
-	switch (offset & 7)
+	switch (offset)
 	{
 	case 0: return m_safety_faults;
 	case 1: return m_field_input & 0xff;
@@ -1140,6 +1472,15 @@ uint8_t srx_c61_state::lua_io_r(offs_t offset)
 	case 5: return s.ram[0xffc];
 	case 6: return (s.cpu_irq ? 0x01 : 0x00) | (s.servo_irq ? 0x02 : 0x00);
 	case 7: return uint8_t(m_adc_offset);
+	case 8: return m_tp_key_col;
+	case 9: return m_tp_keys[m_tp_key_col & 7];
+	case 10: return m_tp_display_index;
+	case 11:
+	{
+		uint8_t const value = m_tp_display[m_tp_display_index % 80];
+		m_tp_display_index = (m_tp_display_index + 1) % 80;
+		return value;
+	}
 	default: return 0;
 	}
 }
@@ -1147,7 +1488,7 @@ uint8_t srx_c61_state::lua_io_r(offs_t offset)
 void srx_c61_state::lua_io_w(offs_t offset, uint8_t data)
 {
 	uint8_t old_faults = m_safety_faults;
-	switch (offset & 7)
+	switch (offset)
 	{
 	case 0: m_safety_faults = data & SAFETY_MASK; break;
 	case 1: m_field_input = (m_field_input & 0xff00) | data; break;
@@ -1157,6 +1498,14 @@ void srx_c61_state::lua_io_w(offs_t offset, uint8_t data)
 		if (m_adc_offset_logs++ < 8)
 			logerror("SRX FAULT: AD7874 channel offset = %+d\n", int(m_adc_offset));
 		break;
+	case 8: m_tp_key_col = data & 7; break;
+	case 9:
+		m_tp_keys[m_tp_key_col & 7] = data;
+		logerror("SRX TP keypad: column %u rows 0x%02X (bit set = pressed)\n",
+				m_tp_key_col & 7, data);
+		break;
+	case 10: m_tp_display_index = data % 80; break;
+	case 11: m_tp_display_index = data % 80; break;
 	default: break;                                     // readback/reserved registers
 	}
 	if (old_faults != m_safety_faults)
@@ -1626,6 +1975,13 @@ void srx_c61_state::srx_c61(machine_config &config)
 	m_dsp2->set_addrmap(AS_PROGRAM, &srx_c61_state::dsp2_program_map);
 	m_dsp2->set_addrmap(AS_DATA, &srx_c61_state::dsp2_data_map);
 
+	// ---- stage 7: teach pendant ----
+	// HD64180/Z180 at 6.144 MHz (a common value; the real crystal is not
+	// measured, see the srx_tp_z180_device note and emulator plan 5.8).
+	SRX_TP_Z180(config, m_tp, 6'144'000);
+	m_tp->set_addrmap(AS_PROGRAM, &srx_c61_state::tp_program_map);
+	m_tp->set_addrmap(AS_IO, &srx_c61_state::tp_io_map);
+
 	// ---- stage 4: CPU-board peripherals ----
 
 	// 8254: 3.072 MHz input (architecture report 6.1).  Counter 0 = 100 Hz
@@ -1656,13 +2012,21 @@ void srx_c61_state::srx_c61(machine_config &config)
 		I8251(config, m_uart[ch], 0);
 
 		RS232_PORT(config, m_rs232[ch], default_rs232_devices, "pty");
-		m_uart[ch]->txd_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_txd));
+		if (ch == 0)
+			m_uart[ch]->txd_handler().set(FUNC(srx_c61_state::uart1_txd_w));
+		else
+			m_uart[ch]->txd_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_txd));
 		m_uart[ch]->dtr_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_dtr));
 		m_uart[ch]->rts_handler().set(m_rs232[ch], FUNC(rs232_port_device::write_rts));
 		m_rs232[ch]->rxd_handler().set(m_uart[ch], FUNC(i8251_device::write_rxd));
 		m_rs232[ch]->dsr_handler().set(m_uart[ch], FUNC(i8251_device::write_dsr));
 		m_rs232[ch]->cts_handler().set(m_uart[ch], FUNC(i8251_device::write_cts));
 	}
+
+	// Pendant ASCI channel 0 transmit -> CPU ch1 8251A receive.  No CTS or DCD
+	// handshake is modelled on the pendant link; the ASCI receiver is enabled
+	// by the firmware itself (CNTLA0 = 0x65, 8N2).
+	m_tp->txa0_wr_callback().set(m_uart[0], FUNC(i8251_device::write_rxd));
 
 	// IRQ wiring from the serial channels (architecture report 4.3):
 	// RX = master IR1/IR2/IR3, TX = slave IR3/IR4/IR5.
@@ -1768,6 +2132,27 @@ void srx_c61_state::machine_start()
 	static constexpr char servo_version[8] = { 'S','R','X','6','-','S','V',0 };
 	std::memcpy(&m_slots[0].ram[0xf00], servo_version, sizeof(servo_version));
 
+	// ---- stage 7: teach pendant ----
+	std::fill(std::begin(m_tp_display), std::end(m_tp_display), uint8_t(' '));
+	for (int line = 0; line < 4; line++)
+	{
+		std::memset(m_tp_display_last[line], ' ', 20);
+		m_tp_display_last[line][20] = '\0';
+	}
+	m_tp_cursor = 0;
+	m_tp_entry_increment = true;
+	m_tp_display_on = false;
+	m_tp_port80 = 0x20;                 // value left by sub_695 after init
+	m_tp_port82 = 0;
+	m_tp_port83 = 0x8a;
+	std::fill(std::begin(m_tp_keys), std::end(m_tp_keys), uint8_t(0));
+	m_tp_key_col = 0;
+	m_tp_display_index = 0;
+	m_tp_key_scan_logs = 0;
+	logerror("SRX TP: Z180 running the pendant EPROM; ASCI ch0 <-> CPU ch1 8251A\n");
+	m_tp_status_timer = timer_alloc(FUNC(srx_c61_state::tp_status_check), this);
+	m_tp_status_timer->adjust(attotime::from_msec(3500));
+
 	// Safety chain defaults: everything clear.  Field input word 0 bit 6 is
 	// the DSS input (1 = DSS on; E401 fires when it is 0, see error_401 doc).
 	m_safety_faults = 0;
@@ -1830,6 +2215,11 @@ ROM_START(srx_c61)
 
 	ROM_REGION(0x010000, "dsp2", 0)
 	ROM_LOAD("u18_dsp.bin", 0x000000, 0x010000, CRC(5aa49dc6) SHA1(d6262065093f3780789fdfb90606c27e8b1c31dc))
+
+	// 32 KB teach-pendant EPROM (M27C256B, socket IC6, HD64180).  Only the
+	// first 0x205A bytes are used; the rest is 0xFF.  CRC/SHA1 of the real dump.
+	ROM_REGION(0x008000, "tp", 0)
+	ROM_LOAD("tp.bin", 0x000000, 0x008000, CRC(c380d24b) SHA1(374a62fb1affeb481f593c7d43a158ef21be9663))
 
 	// 8 KB CPU-board EEPROM.  The real contents are NOT available (plan 6.1,
 	// P1 blocker).  make_roms.sh creates a blank (0xFF) "eeprom.bin" only if
