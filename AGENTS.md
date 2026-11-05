@@ -21,9 +21,6 @@ Context file for AI coding agents working anywhere in this project.
    the `README.md` §4 table.
 4. **Ask when unsure.** If you are not sure about an idea, interpretation or direction,
    ask the user instead of deciding on your own.
-5. **Take care of machine resources.** The project may run on small nodes. Prefer light
-   tools (Python, capstone) over heavy ones (full Ghidra analysis, decompile-all), and ask
-   the user before starting any long-running heavy job.
 
 ## 1. What this project is
 

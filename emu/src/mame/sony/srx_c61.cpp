@@ -72,6 +72,11 @@ private:
 
 	uint8_t diag_io_r();
 	void diag_io_w(uint8_t data);
+
+	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
+	// logged; printable bytes are surfaced as console output.
+	uint32_t servo_console_r(offs_t offset);
+	void servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask);
 };
 
 
@@ -101,8 +106,27 @@ void srx_c61_state::servocpu_map(address_map &map)
 	map(0x00000000, 0x0007ffff).ram();                         // 512 KB RAM at 0
 	map(0x00100000, 0x0013ffff).rom().region("servocpu", 0);   // 256 KB flash (ROM_SERVO.bin)
 	map(0xfffc0000, 0xffffffff).rom().region("servocpu", 0);   // reset alias (vector at 0xFFFFFFF0)
-	// trace stubs (plan 5.3): 0x200000 DPRAM, 0x300000 on-board regs,
-	//                         0x400000/0x400080 DSP windows, 0x500000 second peripheral
+
+	// Stage 1: slot dual-port RAM (firmware initialises it and polls 0x200004
+	// for the host handshake).  Modelled as plain RAM; the MB8421 mailboxes and
+	// the CPU-side window arrive in stage 5.
+	map(0x00200000, 0x00200fff).ram();
+
+	// Stage 1: on-board peripherals, modelled as register stubs so the monitor
+	// runs without faulting.  The 0x30000x block is the baud/SCI setup.
+	map(0x00300000, 0x0030000f).rw(FUNC(srx_c61_state::servo_console_r), FUNC(srx_c61_state::servo_console_w));
+	map(0x00301000, 0x00301003).ram();                         // output latch (LEDs / enables)
+	map(0x00302000, 0x00302003).ram();                         // DSP heartbeat / status
+	map(0x00303000, 0x00303003).ram();
+	map(0x00304000, 0x00304003).ram();
+	map(0x00305000, 0x0030502f).ram();
+	map(0x00307000, 0x00307003).ram();
+	map(0x00308000, 0x003080ff).ram();                         // LEDs / DIP / status
+	map(0x00309000, 0x00309003).ram();
+	map(0x00318000, 0x0031803f).ram();
+	map(0x00500000, 0x0050004f).ram();                         // CXD8477Q pair (stage 2/3)
+
+	// Trace stubs (plan 5.3): the DSP windows 0x400000/0x400080 arrive in stage 3.
 }
 
 // Control board (ADSP-2115 #1): 1K x 24-bit internal program RAM.
@@ -142,6 +166,27 @@ void srx_c61_state::diag_io_w(uint8_t data)
 {
 	// Port 0x20 is the boot progress / fatal-halt output (plan 7.6).
 	logerror("%s: diag port 0x20 = 0x%02X\n", machine().describe_context(), data);
+}
+
+// Stage 1: the SERVO 0x30000x block is the baud/SCI setup (observed command
+// values 0x30/0x74/0xB4 and a 16-bit divisor).  The monitor does not emit its
+// banner standalone: it idles polling slot DPRAM 0x200004 for the host
+// handshake, so the console becomes useful once the CPU side exists (stage 5).
+uint32_t srx_c61_state::servo_console_r(offs_t offset)
+{
+	return 0;
+}
+
+void srx_c61_state::servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	for (int shift = 0; shift < 32; shift += 8)
+	{
+		uint8_t const byte = (data >> shift) & 0xff;
+		uint32_t const m = (mem_mask >> shift) & 0xff;
+		if (m && byte >= 0x20 && byte < 0x7f)
+			logerror("SERVO console: '%c' (0x%02x) -> reg 0x30000%x\n", byte, byte, offset + (shift / 8));
+	}
+	logerror("%s: SERVO reg 0x30000%x <- 0x%08x & 0x%08x\n", machine().describe_context(), offset, data, mem_mask);
 }
 
 
