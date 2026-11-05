@@ -66,6 +66,23 @@
         FLAG_IN / $3021 / $303F status (default clear, so stage 2/3 behaviour
         is unchanged) and the SERVO register stub.  See emu/tests/.
 
+    Stage 6: external fault injection.
+      - The safety register at CPU I/O ports 0xF0-0xF7 is extended to the
+        six plan 5.7 fault classes: E-stop, DSS off, AMPRDY, over-speed,
+        driver fault and ADC offset.  Safe defaults stay all-clear.
+      - DSS is wired to the firmware's own system-input image: flipping it
+        drives field-input word bit 6, and the running SYST task's I/O scan
+        (0x108FC, called from 0x7E8D) copies that bit into RAM 0x62B8 bit 6,
+        the exact input app_10C5C(7) reads in app_3BD28 (0x3BD28).
+      - E-stop, AMPRDY, over-speed and driver fault are injected into the
+        per-axis servo status dword (slot DPRAM +0x100*(k+1), word +0), whose
+        bits the SVT AMP-status parser (0x3B8B8) turns into errors: bit
+        0x1000 -> E300, 0x0400 -> E340, 0x80000 -> E341, 0x4000 -> E400
+        (error constant 0x190 at 0x3BAF5).  DSS/E401 uses the system input.
+      - ADC offset (port 0xF7, signed) offsets every AD7874 channel.
+      - Whether the firmware actually *raises* the error is a separate
+        question; see the stage 6 test and doc/emulator_plan.md section 8.
+
     Stage 4: CPU-board peripherals.
       - 3x 8251A: ch1 0xC0/C4 teach pendant, ch2 0xC8/CC PC host,
         ch3 0xD0/D4 user RS-232C.  Each has an rs232_port slot whose default
@@ -138,11 +155,30 @@ namespace {
 static constexpr int V810_DPRAM_IRQ = 10;
 
 // Safety chain is a bitfield of *faults* (0 = all clear).  It is written by
-// Lua through CPU I/O port 0xF0; see emu/tests/stage5_safety.lua.
-static constexpr uint8_t SAFETY_ESTOP     = 0x01;
-static constexpr uint8_t SAFETY_DSS_OFF   = 0x02;
-static constexpr uint8_t SAFETY_AMPRDY    = 0x04;
-static constexpr uint8_t SAFETY_OVERSPEED = 0x08;
+// Lua through CPU I/O port 0xF0; see emu/tests/stage6_faults.lua.
+//   0x01 E-stop active            -> servo status bit 0x00001000 (E300)
+//   0x02 DSS off                  -> system input 0x62B8 bit 6 (E401)
+//   0x04 AMPRDY fail              -> servo status bit 0x00080000 (E341)
+//   0x08 SPD over-speed           -> servo status bit 0x00004000 (E400)
+//   0x10 driver fault             -> servo status bit 0x00000400 (E340)
+static constexpr uint8_t SAFETY_ESTOP        = 0x01;
+static constexpr uint8_t SAFETY_DSS_OFF      = 0x02;
+static constexpr uint8_t SAFETY_AMPRDY       = 0x04;
+static constexpr uint8_t SAFETY_OVERSPEED    = 0x08;
+static constexpr uint8_t SAFETY_DRIVER_FAULT = 0x10;
+static constexpr uint8_t SAFETY_MASK         = 0x1f;
+
+// Bits of the per-axis servo status dword (slot DPRAM +0x100*(k+1) +0x00)
+// that the SVT AMP-status parser 0x3B8B8 decodes.  Values and error codes are
+// from that function's tests (addresses are the mov of the error constant):
+//   0x00001000 -> 0x12C E300 emergency stop      (0x3B8FA)
+//   0x00000400 -> 0x154 E340 AMP WDT             (0x3B9AB / 0x3B9C0)
+//   0x00080000 -> 0x155 E341 AMP Ready           (0x3B9C7 / 0x3B9D4)
+//   0x00004000 -> 0x190 E400 SPD over-speed      (0x3BAE5 / 0x3BAF1)
+static constexpr uint32_t SERVO_ST_ESTOP        = 0x00001000;
+static constexpr uint32_t SERVO_ST_AMP_WDT      = 0x00000400;
+static constexpr uint32_t SERVO_ST_OVERSPEED    = 0x00004000;
+static constexpr uint32_t SERVO_ST_AMPRDY       = 0x00080000;
 
 // Guessed interrupt rates.  The real sources are still to be measured
 // (plan section 4); only the ratios matter for keeping timeouts quiet.
@@ -291,6 +327,8 @@ private:
 	uint8_t lua_io_r(offs_t offset);
 	void lua_io_w(offs_t offset, uint8_t data);
 	void safety_changed();
+	uint32_t servo_status_faults() const;
+	uint8_t servo_status_byte(offs_t byteaddr, uint8_t stored) const;
 
 	void slot_cpu_irq(int slot, bool state);
 	uint8_t slot_io_read_byte(int slot, offs_t offset);
@@ -342,8 +380,11 @@ private:
 	slot_window m_slots[5];
 	uint8_t m_safety_faults;
 	uint16_t m_field_input;
+	int8_t m_adc_offset;
 	unsigned m_safety_logs;
 	unsigned m_slot_dpram_irq_logs;
+	unsigned m_adc_offset_logs;
+	unsigned m_servo_status_logs;
 
 	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
 	// logged; printable bytes are surfaced as console output.
@@ -469,11 +510,11 @@ void srx_c61_state::maincpu_io_map(address_map &map)
 	// Stage 5: Lua fault-injection / field-I/O panel.  These ports are not
 	// used by the firmware (the highest decoded port is 0xD4).
 	//   0xF0 safety fault bits (0 = all clear; see SAFETY_* above)
-	//   0xF1/0xF2 field input word, low/high byte
+	//   0xF1/0xF2 field input word, low/high byte (raw override)
 	//   0xF3/0xF4 last I/O-board output word, low/high byte (readback)
 	//   0xF5 SERVO DPRAM mailbox byte
 	//   0xF6 slot 1 IRQ pending (bit0 SERVO->CPU, bit1 CPU->SERVO)
-	//   0xF7 reserved
+	//   0xF7 ADC offset, signed 8-bit (added to every AD7874 channel)
 	map(0x00f0, 0x00f7).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
 }
 
@@ -936,6 +977,11 @@ uint32_t srx_c61_state::slot_r(int slot, offs_t offset, uint32_t mem_mask)
 			if (slot == 0)
 			{
 				value = slot_dpram_read_byte(0, byteaddr);
+				uint8_t const faulted = servo_status_byte(byteaddr, value);
+				if (faulted != value && m_servo_status_logs++ < 16)
+					logerror("SRX FAULT: servo axis status +0x%03X read 0x%02X (stored 0x%02X)\n",
+							byteaddr, faulted, value);
+				value = faulted;
 				if (byteaddr == 0xffc)
 					mailbox_read = true;
 				if (byteaddr == 0x0004 && m_slots[0].handshake_reads < 8)
@@ -1093,6 +1139,7 @@ uint8_t srx_c61_state::lua_io_r(offs_t offset)
 	case 4: return (m_slots[1].field_out >> 8) & 0xff;
 	case 5: return s.ram[0xffc];
 	case 6: return (s.cpu_irq ? 0x01 : 0x00) | (s.servo_irq ? 0x02 : 0x00);
+	case 7: return uint8_t(m_adc_offset);
 	default: return 0;
 	}
 }
@@ -1102,30 +1149,94 @@ void srx_c61_state::lua_io_w(offs_t offset, uint8_t data)
 	uint8_t old_faults = m_safety_faults;
 	switch (offset & 7)
 	{
-	case 0: m_safety_faults = data & 0x0f; break;
+	case 0: m_safety_faults = data & SAFETY_MASK; break;
 	case 1: m_field_input = (m_field_input & 0xff00) | data; break;
 	case 2: m_field_input = (m_field_input & 0x00ff) | (uint16_t(data) << 8); break;
+	case 7:
+		m_adc_offset = int8_t(data);
+		if (m_adc_offset_logs++ < 8)
+			logerror("SRX FAULT: AD7874 channel offset = %+d\n", int(m_adc_offset));
+		break;
 	default: break;                                     // readback/reserved registers
 	}
 	if (old_faults != m_safety_faults)
 		safety_changed();
 }
 
+// Fault bits OR-ed into the CPU-side view of the per-axis servo status dword.
+// These are exactly the bits the SVT AMP-status parser 0x3B8B8 tests.
+uint32_t srx_c61_state::servo_status_faults() const
+{
+	uint32_t bits = 0;
+	if (m_safety_faults & SAFETY_ESTOP)
+		bits |= SERVO_ST_ESTOP;
+	if (m_safety_faults & SAFETY_AMPRDY)
+		bits |= SERVO_ST_AMPRDY;
+	if (m_safety_faults & SAFETY_OVERSPEED)
+		bits |= SERVO_ST_OVERSPEED;
+	if (m_safety_faults & SAFETY_DRIVER_FAULT)
+		bits |= SERVO_ST_AMP_WDT;
+	return bits;
+}
+
+// slot-1 per-axis blocks live at +0x100*(k+1), k=0..3; the status dword is
+// at +0x00.  Apply the fault bits on the CPU side only: the V810 side keeps
+// the value its firmware wrote (the model injects an external condition,
+// it does not overwrite the board's own status).
+uint8_t srx_c61_state::servo_status_byte(offs_t byteaddr, uint8_t stored) const
+{
+	offs_t const off = byteaddr & 0xfff;
+	unsigned const block = off >> 8;
+	if (block < 1 || block > 4 || (off & 0xff) > 3)
+		return stored;
+	uint32_t const bits = servo_status_faults();
+	return stored | uint8_t(bits >> (8 * (off & 3)));
+}
+
 void srx_c61_state::safety_changed()
 {
+	uint32_t const bits = servo_status_faults();
 	if (m_safety_logs++ < 32)
-		logerror("SRX SAFETY: faults 0x%02X (estop=%d dss_off=%d amprdy=%d overspeed=%d)\n",
+		logerror("SRX SAFETY: faults 0x%02X (estop=%d dss_off=%d amprdy=%d overspeed=%d driver=%d) -> servo status bits 0x%05X\n",
 				m_safety_faults,
 				(m_safety_faults & SAFETY_ESTOP) ? 1 : 0,
 				(m_safety_faults & SAFETY_DSS_OFF) ? 1 : 0,
 				(m_safety_faults & SAFETY_AMPRDY) ? 1 : 0,
-				(m_safety_faults & SAFETY_OVERSPEED) ? 1 : 0);
+				(m_safety_faults & SAFETY_OVERSPEED) ? 1 : 0,
+				(m_safety_faults & SAFETY_DRIVER_FAULT) ? 1 : 0,
+				bits);
+
+	// DSS is a real system-input bit: keep bit 6 of the field-input word in
+	// step with the switch, so the SYST I/O scan (0x108FC) writes it into
+	// the firmware's input image 0x62B8, where app_10C5C(7) reads it.
+	if (m_safety_faults & SAFETY_DSS_OFF)
+		m_field_input &= ~uint16_t(0x0040);
+	else
+		m_field_input |= 0x0040;
 
 	// The DSP FLAG_IN input is the amplifier-ready/safety level.  Keep the
 	// default (all clear) behaviour of stage 2/3; a fault drops it.
 	bool const clear = (m_safety_faults == 0);
 	dsp_set_flag_in(0, clear ? 1 : 0);
 	dsp_set_flag_in(1, clear ? 1 : 0);
+
+	// Trace the error path this switch feeds, so a run shows the cause even
+	// when the EEPROM blocker keeps the SVT/error task from reaching it.
+	if (m_safety_faults & SAFETY_DSS_OFF)
+		logerror("SRX FAULT: DSS off -> system-input 0x62B8 bit 6 = 0; "
+				"app_3BD28 (0x3BD28) would request E401 (code 0x191 at 0x3BE1B)\n");
+	if (m_safety_faults & SAFETY_OVERSPEED)
+		logerror("SRX FAULT: SPD over-speed -> servo status 0x4000; "
+				"SVT AMP parser 0x3B8B8 would request E400 (code 0x190 at 0x3BAF5)\n");
+	if (m_safety_faults & SAFETY_AMPRDY)
+		logerror("SRX FAULT: AMPRDY fail -> servo status 0x80000; "
+				"parser 0x3B8B8 would request E341 (code 0x155)\n");
+	if (m_safety_faults & SAFETY_DRIVER_FAULT)
+		logerror("SRX FAULT: driver fault -> servo status 0x400; "
+				"parser 0x3B8B8 would request E340 (code 0x154)\n");
+	if (m_safety_faults & SAFETY_ESTOP)
+		logerror("SRX FAULT: E-stop -> servo status 0x1000; "
+				"parser 0x3B8B8 would request E300 (code 0x12C)\n");
 }
 
 
@@ -1382,7 +1493,8 @@ uint16_t srx_c61_state::dsp_adc_r(int which)
 	// AD7874: four consecutive reads return CH1..CH4.  Values are a stub (the
 	// plant model supplies real phase currents in stage 6).
 	unsigned &index = m_adc_index[which];
-	uint16_t const result = m_adc[which][index];
+	int const raw = int(m_adc[which][index]) + int(m_adc_offset);
+	uint16_t const result = uint16_t(std::clamp(raw, 0, 0xffff));
 	index = (index + 1) & 3;
 	return result;
 }
@@ -1659,9 +1771,12 @@ void srx_c61_state::machine_start()
 	// Safety chain defaults: everything clear.  Field input word 0 bit 6 is
 	// the DSS input (1 = DSS on; E401 fires when it is 0, see error_401 doc).
 	m_safety_faults = 0;
-	m_field_input = 0x0040;
+	m_field_input = 0x0040;             // raw field inputs, bit 6 = DSS on
+	m_adc_offset = 0;
 	m_safety_logs = 0;
 	m_slot_dpram_irq_logs = 0;
+	m_adc_offset_logs = 0;
+	m_servo_status_logs = 0;
 	safety_changed();
 
 	// EEPROM: copy the optional image (or the 0xFF fill from ROM_FILL) into
