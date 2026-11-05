@@ -17,7 +17,7 @@
     access (MAME logs these to error.log under -log), which acts as the
     trace stub of plan section 7.
 
-    Stage 2 (this file): Control board models.
+    Stage 2: Control board models.
       - boot page 0 is loaded by machine_start(); BFORCE writes to SYSCNTL
         (DM 0x3FFF bit 9) reload BPAGE (bits 6-8) and reset the core while
         keeping the DAG registers, exactly like the real chip;
@@ -27,10 +27,22 @@
       - IRQ1 (ADC end-of-conversion) and IRQ2 (supervision tick) are driven
         by timers at guessed rates (plan section 4: both still unmeasured).
 
-    A temporary mailbox self-test (SRX_STAGE2_SELFTEST) injects 0x8001 into
-    both CXD8501R mailboxes after boot and logs the acknowledge.  It exists
-    only to exercise the page-1 main loop until the V810 host window is
-    wired up in stage 3; remove it then.
+    Stage 3 (this file): SERVO <-> Control board windows.
+      - V810 program space 0x400000/0x400080 = DSP DM $3000-$303F of DSP 1/2
+        (doc/servo_dsp_link.md section 1): 64 16-bit words, word n at byte
+        2n.  Both windows are routed to the very same cxd8501r_model arrays
+        the DSP data maps use, so a command written by the V810 is executed
+        by the DSP firmware and its write-back of 0 is what the V810 polls.
+        No protocol logic is duplicated.
+      - The absolute-encoder/SPORT0 path stays a documented stub (plan
+        section 5.6 / doc/abs_encoder_protocol.md); no frame format is
+        invented here.
+
+    A temporary self-test (SRX_STAGE3_SELFTEST) drives the window handlers
+    with 0x8001/0x8002/0x8000 and reads the ack back through the same window.
+    It is needed because the SERVO monitor console is still gated on the
+    DPRAM host handshake (stage 1 finding), so it cannot issue CONNECT by
+    itself yet.  Remove it when the CPU side drives the handshake (stage 5).
 
     TODO (plan milestones):
       1. SERVO monitor UART (banner string at ROM offset 0x21CDA) -> TCP terminal
@@ -53,9 +65,10 @@
 
 namespace {
 
-// Temporary bring-up test: 0x8001 into the mailbox to prove the page-1 main
-// loop runs and acknowledges.  Remove when the V810 window exists (stage 3).
-#define SRX_STAGE2_SELFTEST 1
+// Temporary bring-up test: drive the V810->DSP windows directly to prove the
+// shared-register path and the command acknowledgement.  Remove when the CPU
+// side starts the DPRAM handshake and the SERVO monitor can issue CONNECT.
+#define SRX_STAGE3_SELFTEST 1
 
 // Guessed interrupt rates.  The real sources are still to be measured
 // (plan section 4); only the ratios matter for keeping timeouts quiet.
@@ -124,6 +137,10 @@ private:
 	uint32_t servo_console_r(offs_t offset);
 	void servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask);
 
+	// Stage 3: SERVO DSP windows 0x400000/0x400080 -> CXD8501R register files.
+	uint32_t servo_dsp_window_r(offs_t offset, uint32_t mem_mask);
+	void servo_dsp_window_w(offs_t offset, uint32_t data, uint32_t mem_mask);
+
 	// Stage 2: Control board (2x ADSP-2115)
 	cxd8501r_model m_cxd[2];
 	uint16_t m_adc[2][4];
@@ -131,6 +148,7 @@ private:
 	uint16_t m_outlatch[2];
 	uint16_t m_syscntl[2];
 	bool m_page1_active[2];
+	bool m_flagin_logged[2];
 	uint8_t m_cxd_log_count[2][0x40];
 
 	emu_timer *m_irq1_timer[2];
@@ -147,6 +165,7 @@ private:
 	void dsp_selftest(int unused);
 
 	void dsp_set_line(int which, int line, int state);
+	void dsp_set_flag_in(int which, int state);
 	uint16_t dsp_cxd_r(int which, offs_t offset);
 	void dsp_cxd_w(int which, offs_t offset, uint16_t data);
 	uint16_t dsp_adc_r(int which);
@@ -220,7 +239,10 @@ void srx_c61_state::servocpu_map(address_map &map)
 	map(0x00318000, 0x0031803f).ram();
 	map(0x00500000, 0x0050004f).ram();                         // CXD8477Q pair (stage 2/3)
 
-	// Trace stubs (plan 5.3): the DSP windows 0x400000/0x400080 arrive in stage 3.
+	// Stage 3: DSP windows.  0x400000 = DSP 1 DM $3000-$303F, 0x400080 =
+	// DSP 2, word n at byte 2n (doc/servo_dsp_link.md section 1).  Both go
+	// straight to the CXD8501R register files used by the DSP data maps.
+	map(0x00400000, 0x004000ff).rw(FUNC(srx_c61_state::servo_dsp_window_r), FUNC(srx_c61_state::servo_dsp_window_w));
 }
 
 // Control board (ADSP-2115 #1): 1K x 24-bit internal program RAM.
@@ -302,6 +324,87 @@ void srx_c61_state::servo_console_w(offs_t offset, uint32_t data, uint32_t mem_m
 
 
 /***************************************************************************
+    SERVO <-> Control board windows (stage 3)
+***************************************************************************/
+
+// The V810 side sees DSP DM $3000-$303F as 64 16-bit words at byte 2n.
+// Both accesses operate on the same cxd8501r_model registers as the DSP
+// data maps, so the DSP firmware's acknowledge (writing 0 to $3000) is
+// immediately visible to the V810 polling the command word.
+uint32_t srx_c61_state::servo_dsp_window_r(offs_t offset, uint32_t mem_mask)
+{
+	offset &= 0x00ff;
+	uint32_t result = 0;
+
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (24 - 8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		int const which = (byteaddr & 0x80) ? 1 : 0;
+		offs_t const reg = (byteaddr & 0x7f) >> 1;
+		uint16_t const value = dsp_cxd_r(which, reg);
+		uint8_t const byte = (byteaddr & 1) ? uint8_t(value & 0xff) : uint8_t(value >> 8);
+		result |= uint32_t(byte) << (24 - 8 * lane);
+	}
+
+	return result;
+}
+
+void srx_c61_state::servo_dsp_window_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	offset &= 0x00ff;
+
+	// Collect the touched registers first, then run the normal CXD8501R write
+	// handler once per register so its side effects (mailbox ack logging,
+	// $3021 W1C, $3025 ADC start) behave exactly as on the DSP bus.
+	int n = 0;
+	int touched_which[4];
+	offs_t touched_reg[4];
+	uint16_t touched_value[4];
+
+	for (int lane = 0; lane < 4; lane++)
+	{
+		uint32_t const mask = 0xffu << (24 - 8 * lane);
+		if (!(mem_mask & mask))
+			continue;
+
+		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
+		int const which = (byteaddr & 0x80) ? 1 : 0;
+		offs_t const reg = (byteaddr & 0x7f) >> 1;
+		uint8_t const byte = (data >> (24 - 8 * lane)) & 0xff;
+
+		int entry = -1;
+		for (int i = 0; i < n; i++)
+		{
+			if (touched_which[i] == which && touched_reg[i] == reg)
+			{
+				entry = i;
+				break;
+			}
+		}
+		if (entry < 0)
+		{
+			entry = n++;
+			touched_which[entry] = which;
+			touched_reg[entry] = reg;
+			touched_value[entry] = m_cxd[which].regs[reg];
+		}
+
+		if (byteaddr & 1)
+			touched_value[entry] = (touched_value[entry] & 0xff00) | byte;
+		else
+			touched_value[entry] = (touched_value[entry] & 0x00ff) | (uint16_t(byte) << 8);
+	}
+
+	for (int i = 0; i < n; i++)
+		dsp_cxd_w(touched_which[i], touched_reg[i], touched_value[i]);
+}
+
+
+/***************************************************************************
     Control board (stage 2)
 ***************************************************************************/
 
@@ -309,6 +412,28 @@ void srx_c61_state::dsp_set_line(int which, int line, int state)
 {
 	adsp2115_device &dsp = which ? *m_dsp2 : *m_dsp1;
 	dsp.set_input_line(line, state);
+}
+
+// The ADSP-21xx core has no external FLAG_IN input line (only the register
+// state), so the driver drives the state directly.  FLAG_IN is the safety
+// chain / amplifier-ready input (plan section 5.4): with it asserted the DSP
+// accepts the mode commands and actually enables a motor.  Default = "all
+// clear", which is what a fault-injection switch would deassert later.
+void srx_c61_state::dsp_set_flag_in(int which, int level)
+{
+	adsp2115_device &dsp = which ? *m_dsp2 : *m_dsp1;
+	device_state_interface *iface = nullptr;
+	if (dsp.interface(iface) && iface)
+	{
+		iface->set_state_int(ADSP2100_FLAGIN, level ? 1 : 0);
+		if (!m_flagin_logged[which])
+		{
+			m_flagin_logged[which] = true;
+			device_state_entry const *entry = iface->state_find_entry(ADSP2100_FLAGIN);
+			logerror("DSP%d FLAG_IN modelled as %d (safety chain all clear)\n",
+					which + 1, entry ? int(entry->value()) : -1);
+		}
+	}
 }
 
 void srx_c61_state::dsp_boot_page(int which, int page)
@@ -462,6 +587,10 @@ void srx_c61_state::dsp_irq1_tick(int which)
 
 void srx_c61_state::dsp_irq2_tick(int which)
 {
+	// Re-assert the safety-chain input every supervision tick: a core reset
+	// (BFORCE) clears the FLAG_IN register, and this is the input the IRQ2
+	// handler evaluates before it latches the requested motor mode.
+	dsp_set_flag_in(which, 1);
 	dsp_set_line(which, ADSP2115_IRQ2, ASSERT_LINE);
 	m_irq_clear_timer[which]->adjust(attotime::from_usec(2), which);
 }
@@ -479,12 +608,37 @@ void srx_c61_state::dsp_adc_done(int which)
 	m_irq_clear_timer[which]->adjust(attotime::from_usec(2), which);
 }
 
-void srx_c61_state::dsp_selftest(int unused)
+void srx_c61_state::dsp_selftest(int step)
 {
-	// Stage-2 acceptance aid only: no host is attached to the mailboxes yet.
-	logerror("DSP self-test: injecting mailbox command 0x8001\n");
-	dsp_cxd_w(0, 0x0000, 0x8001);
-	dsp_cxd_w(1, 0x0000, 0x8001);
+	// Stage-3 acceptance aid: the SERVO monitor is still gated on the DPRAM
+	// host handshake (stage 1), so drive the V810 window handlers directly,
+	// exactly as the V810 firmware would: command word at window offset 0,
+	// then poll it until the DSP writes 0 back.
+	static const uint16_t commands[] = { 0x8001, 0x8002, 0x8000 };   // connect, servo on, servo off
+	static const char *const names[] = { "CONNECT 0x8001", "SERVO ON 0x8002", "SERVO OFF 0x8000" };
+	static constexpr int window[2] = { 0x00, 0x80 };                 // DSP 1 / DSP 2
+
+	if (step > 0)
+	{
+		int const prev = step - 1;
+		for (int which = 0; which < 2; which++)
+		{
+			uint16_t const ack = uint16_t(servo_dsp_window_r(window[which], 0xffff0000) >> 16);
+			logerror("Stage-3 window self-test: DSP%d %s ack=%04X (%s)\n",
+					which + 1, names[prev], ack, ack == 0 ? "ACKED" : "NOT ACKED");
+		}
+	}
+
+	if (step < int(std::size(commands)))
+	{
+		for (int which = 0; which < 2; which++)
+		{
+			logerror("Stage-3 window self-test: DSP%d <- %s via window 0x40%04X\n",
+					which + 1, names[step], 0x0000 + window[which]);
+			servo_dsp_window_w(window[which], uint32_t(commands[step]) << 16, 0xffff0000);
+		}
+		m_selftest_timer->adjust(attotime::from_msec(200), step + 1);
+	}
 }
 
 
@@ -528,6 +682,7 @@ void srx_c61_state::machine_start()
 		m_outlatch[i] = 0;
 		m_syscntl[i] = 0;
 		m_page1_active[i] = false;
+		m_flagin_logged[i] = false;
 		std::fill(std::begin(m_cxd_log_count[i]), std::end(m_cxd_log_count[i]), 0);
 
 		m_irq1_timer[i] = timer_alloc(FUNC(srx_c61_state::dsp_irq1_tick), this);
@@ -542,14 +697,19 @@ void srx_c61_state::machine_start()
 	m_dsp1->load_boot_data(memregion("dsp1")->base(), m_dsp1_pm);
 	m_dsp2->load_boot_data(memregion("dsp2")->base(), m_dsp2_pm);
 
+	// Safety chain "all clear" (see dsp_set_flag_in); re-applied on every
+	// supervision tick because BFORCE resets the core.
+	dsp_set_flag_in(0, 1);
+	dsp_set_flag_in(1, 1);
+
 	// Guessed periodic sources (see the note at the top of the file).
 	m_irq1_timer[0]->adjust(attotime::from_hz(DSP_IRQ1_HZ), 0, attotime::from_hz(DSP_IRQ1_HZ));
 	m_irq1_timer[1]->adjust(attotime::from_hz(DSP_IRQ1_HZ), 1, attotime::from_hz(DSP_IRQ1_HZ));
 	m_irq2_timer[0]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 0, attotime::from_hz(DSP_IRQ2_HZ));
 	m_irq2_timer[1]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 1, attotime::from_hz(DSP_IRQ2_HZ));
 
-#if SRX_STAGE2_SELFTEST
-	m_selftest_timer->adjust(attotime::from_msec(500));
+#if SRX_STAGE3_SELFTEST
+	m_selftest_timer->adjust(attotime::from_msec(500), 0);
 #endif
 }
 
