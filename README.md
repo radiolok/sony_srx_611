@@ -160,6 +160,9 @@ preliminary IDA databases.
 
 ### 3.3 Planned / remaining
 
+- **Whole-system emulator** ([`doc/emulator_plan.md`](doc/emulator_plan.md)): stage 0 (MAME
+  skeleton, all four CPUs boot) is done — see [`emu/`](emu). Next: stage 1 (SERVO monitor
+  UART → TCP terminal), then Control board, then the whole system.
 - Complete the CPU-firmware decompilation (several switch-heavy functions must be
   hand-reconstructed; see `AGENTS.md` §8). Apply the v2 function names to the IDA DB.
 - Confirm which Mother-board slot maps to which DPRAM window (the unit has CPU + SIO2,
@@ -216,3 +219,4 @@ the per-session work log is [`history.md`](history.md).
 | [`tools/srxwin/`](tools/srxwin) | SRXWIN helpers: WinHelp extractor, LUNA symbol-table dumper, SRXMONIE command scanner |
 | [`tools/v810/v810dis.py`](tools/v810) | NEC V810 linear disassembler with constant tracking and address-constant search — SERVO board firmware |
 | [`tools/adsp/adsp21xx.py`](tools/adsp) | ADSP-21xx boot-EPROM unpacker, disassembler (MAME port) and DM cross-reference — Control board DSPs |
+| [`emu/`](emu) | Whole-system MAME driver `sony/srx_c61` (stage 0: i486 + V810 + 2× ADSP-2115 boot), `build.sh`, `Dockerfile`, `make_roms.sh`, `README.md` — builds the `srx-c61-emu` container |

@@ -47,8 +47,15 @@ custom device models, Lua test scripts, ROM set layout, a `build.sh`). `build.sh
 files into a MAME checkout and builds only what is needed:
 
 ```sh
-make SUBTARGET=srx SOURCES=src/mame/sony/srx_c61.cpp REGENIE=1 -j$(nproc)
+make SOURCES=src/mame/sony/srx_c61.cpp REGENIE=1 -j$(nproc) \
+     USE_QTDEBUG=0 NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 NO_USE_PULSEAUDIO=1 NO_USE_PIPEWIRE=1
 ```
+
+> **Implemented 2026-11-05 (stage 0):** no custom `srx` subtarget is needed — `SOURCES=`
+> alone limits the build to the driver plus the core/devices it pulls in (fast, small
+> binary). The extra flags disable the Qt debugger (`USE_QTDEBUG=0`; Qt would otherwise be
+> required on Linux) and the audio backends so no Qt/portaudio/pulse/pipewire headers are
+> needed. See `emu/` (driver, `build.sh`, `Dockerfile`, `make_roms.sh`, `README.md`).
 
 MAME needs ROMs in a set directory (`roms/srx_c61/`) with CRC/SHA1 in the driver. The repo
 images are the source; `build.sh` can create the set.
@@ -350,7 +357,7 @@ Priority: **P1** blocks a milestone, **P2** needed for a realistic run, **P3** n
 
 | Stage | Scope | Done when |
 |---|---|---|
-| **0. Skeleton** | `emu/` folder, `build.sh`, empty driver with the four CPUs and ROM loading, trace stubs everywhere | MAME starts the driver headless; each CPU fetches its first instructions (trace shows the reset vectors) |
+| **0. Skeleton** | `emu/` folder, `build.sh`, empty driver with the four CPUs and ROM loading, trace stubs everywhere | ✅ **done 2026-11-05** — MAME starts the driver headless; each CPU fetches its first instructions (i486 boots the EPROM + inits 8254/8251, V810 starts from `ROM_SERVO`, both DSPs run their boot loader). Docker image `srx-c61-emu` built |
 | **1. SERVO alone** | V810 + RAM + monitor UART + trace stubs; DPRAM and DSP windows as RAM | Banner `*** Servo Board Monitor / Copyright(C) 1995 Sony Corp. ***` on the TCP terminal; `HELP` and `VER` answer |
 | **2. Control board alone** | 2× ADSP-2115, boot pages + BFORCE, CXD8501R + AD7874 stubs, IRQ1/IRQ2 timers | Both DSPs reach the page-1 main loop; the heartbeat bit toggles; a Lua script sends `0x8001`, `0x8002` and sees the ack, then changing PWM compares |
 | **3. SERVO + Control** | Connect the windows `0x400000/0x400080` to the CXD8501R models | Monitor `CONNECT` succeeds; servo on/off from the monitor gives `0x8001`/`0x8002…` and acks; `ABSCOPY` runs the SPORT0 path |
