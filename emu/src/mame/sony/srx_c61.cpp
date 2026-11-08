@@ -111,8 +111,14 @@
       - 8 KB EEPROM at 0x600000, busy/status port 0x0C.  The real contents
         are NOT available (plan 6.1, P1).  A blank (0xFF) image is filled
         from an optional "eeprom.bin" ROM in the "eeprom" region; drop a
-        real dump in the ROM set with that name to use it.  Writes go to a
-        RAM copy for the session (nothing persists).
+        real dump in the ROM set with that name to use it.  The 8 KB are
+        battery-free non-volatile storage: MAME saves them on exit as
+        nvram/srx_c61/eeprom_nv (raw 8192-byte image, same layout as the chip)
+        and reloads them on the next start, so parameters entered on the
+        pendant or loaded as a .CTR file survive.  The ROM image is only the
+        default used when no saved file exists (delete the file to reload
+        it).  Port 0x0C bit 6 = write complete (the driver at 0x6B1C polls it
+        after each 32-byte page and reports 0x7919 if it stays clear).
       - PC-card window 0x200000 returns 0xFF ("no card"), port 0x4C bit 0 =
         attribute-memory select (stored and logged).
       - Slot latches 0x30/34/38/3C/40 (stored and logged), five 64 KB slot
@@ -143,6 +149,7 @@
 #include "bus/rs232/rs232.h"
 #include "machine/i8251.h"
 #include "machine/msm6242.h"
+#include "machine/nvram.h"
 #include "machine/pic8259.h"
 #include "machine/pit8253.h"
 
@@ -336,6 +343,7 @@ public:
 		, m_uart(*this, "uart%u", 0U)
 		, m_rs232(*this, "rs232_%u", 1U)
 		, m_rtc(*this, "rtc")
+		, m_eeprom_nv(*this, "eeprom_nv")
 		, m_eeprom_ram(*this, "eeprom_ram")
 	{
 	}
@@ -361,6 +369,7 @@ private:
 	required_device_array<i8251_device, 3> m_uart;
 	required_device_array<rs232_port_device, 3> m_rs232;
 	required_device<msm6242_device> m_rtc;
+	required_device<nvram_device> m_eeprom_nv;
 	required_shared_ptr<uint32_t> m_eeprom_ram;
 
 	void maincpu_map(address_map &map);
@@ -389,6 +398,7 @@ private:
 	uint8_t sys_input1_r();
 	uint8_t eeprom_status_r();
 	void eeprom_status_w(uint8_t data);
+	void eeprom_nvram_init(nvram_device &nvram, void *data, size_t size);
 	uint8_t pccard_attr_r();
 	void pccard_attr_w(uint8_t data);
 	uint8_t pccard_r(offs_t offset);
@@ -583,7 +593,7 @@ void srx_c61_state::maincpu_map(address_map &map)
 {
 	map(0x00000000, 0x001fffff).ram();                         // 2 MB SRAM at 0
 	map(0x00200000, 0x002fffff).rw(FUNC(srx_c61_state::pccard_r), FUNC(srx_c61_state::pccard_w)); // PC card window (empty: reads 0xFF)
-	map(0x00600000, 0x00601fff).ram().share(m_eeprom_ram);      // 8 KB EEPROM (RAM copy of the blank/optional image)
+	map(0x00600000, 0x00601fff).ram().share(m_eeprom_ram);      // 8 KB EEPROM (nvram "eeprom_nv", saved on exit)
 
 	// Stage 5: slot windows.  The first 4 KB of each 64 KB window is the
 	// real dual-port RAM (2x MB8421); the rest of the window is unused stub
@@ -1121,17 +1131,37 @@ uint8_t srx_c61_state::sys_input1_r()
 }
 
 // ---- EEPROM ---------------------------------------------------------------
-// Port 0x0C: write-complete / status.  The boot EPROM (0x808C) proceeds only
-// when bit 0 and bit 1 are clear; the real chip content is the plan 6.1
-// blocker, so this model always reports "ready, no error".
+// Port 0x0C: CPU-board status.  The boot EPROM (0x9D0/0xA90/0xB30) proceeds
+// only when bits 0 and 1 are clear.  Bit 6 is the EEPROM write-complete flag:
+// the EEPROM driver (0x6C19/0x6C2B) waits one tick after each 32-byte page
+// and needs bit 6 set, otherwise it reports 0x7919 (timeout).  Writes land
+// instantly in the model, so the chip is always "complete, no error".
+// INIT also stores the raw byte at 0x4A0A (0x7F3D) but nothing tests it.
 uint8_t srx_c61_state::eeprom_status_r()
 {
-	return 0x00;
+	return 0x40;
 }
 
 void srx_c61_state::eeprom_status_w(uint8_t data)
 {
 	logerror("%s: EEPROM status port 0x0C <- 0x%02X\n", machine().describe_context(), data);
+}
+
+// Default EEPROM contents, used only when no saved nvram/srx_c61/eeprom_nv file
+// exists: the "eeprom" ROM region (a real dump, or make_roms.sh's 0xFF blank).
+void srx_c61_state::eeprom_nvram_init(nvram_device &nvram, void *data, size_t size)
+{
+	auto *const dst = static_cast<uint8_t *>(data);
+	std::fill_n(dst, size, uint8_t(0xff));
+	if (memory_region *eeprom = memregion("eeprom"))
+	{
+		size_t const bytes = std::min<size_t>(size, eeprom->bytes());
+		std::memcpy(dst, eeprom->base(), bytes);
+		if (std::any_of(dst, dst + bytes, [](uint8_t b) { return b != 0xff; }))
+			logerror("EEPROM: no saved nvram, using the image from the ROM set\n");
+		else
+			logerror("EEPROM: no saved nvram and no real dump (plan 6.1); blank 0xFF image\n");
+	}
 }
 
 // ---- PC card --------------------------------------------------------------
@@ -2039,6 +2069,10 @@ void srx_c61_state::srx_c61(machine_config &config)
 
 	// RTC: MSM6242-like part, 16 BCD registers on ports 0x60..0x9C.
 	MSM6242(config, m_rtc, 32.768_kHz_XTAL);
+
+	// 8 KB parameter EEPROM (U50 HN58C66 / U26 HN58V66A): persists across runs.
+	NVRAM(config, m_eeprom_nv, nvram_device::DEFAULT_CUSTOM);
+	m_eeprom_nv->set_custom_handler(FUNC(srx_c61_state::eeprom_nvram_init));
 }
 
 
@@ -2164,18 +2198,10 @@ void srx_c61_state::machine_start()
 	m_servo_status_logs = 0;
 	safety_changed();
 
-	// EEPROM: copy the optional image (or the 0xFF fill from ROM_FILL) into
-	// the writable RAM copy.  The real chip contents are the plan 6.1 P1
-	// blocker; see the header comment.
-	if (memory_region *eeprom = memregion("eeprom"))
-	{
-		uint32_t const bytes = std::min<uint32_t>(0x2000, eeprom->bytes());
-		std::memcpy(&m_eeprom_ram[0], eeprom->base(), bytes);
-		if (std::any_of(eeprom->base(), eeprom->base() + bytes, [](uint8_t b) { return b != 0xff; }))
-			logerror("EEPROM: using image from the ROM set (real dump present)\n");
-		else
-			logerror("EEPROM: no real dump (plan 6.1); blank 0xFF image in use\n");
-	}
+	// EEPROM: the 8 KB window is the nvram device's storage.  MAME loads the
+	// saved image (or calls eeprom_nvram_init) after machine_start and saves
+	// it on exit.  The byte order is the address order on a little-endian host.
+	m_eeprom_nv->set_base(&m_eeprom_ram[0], 0x2000);
 
 	// The default peer of every rs232 port is a pseudo terminal; print its
 	// slave device so an external program can connect to it.

@@ -135,8 +135,74 @@ flowchart LR
 | Timer, IRQ | OKI M82C54-2, 2× OKI M82C59A-2 | [P][F] |
 | Glue logic | Altera PLD (part number hidden under the pSOS+ licence label "SN 062664A") | [P] |
 | Other | 50 MHz oscillator, RESET and SELF-CHECK switches, back-up cell for the RTC, DB9 on the bracket | [P][H] |
+| **Parameter EEPROM** | **U26 Hitachi HN58V66AFP-10** (8K×8, SOP28, 2.7–5.5 V, date 9644), next to the supercap; holds the `.CTR` block (architecture report §8.7). Not dumped yet (photo 2026-11-08) | [P][F] |
+| Refs (photo 2026-11-08) | boot EPROM ST M27C256B-10F1 in socket **U23**; flash 2× 28F400B5-6TE (U24, U25; matches the `MT28F400B5` dumps in `FW/SRX6-CPU/2/`); SRAM 4× TC551001CF-70L (U31, U32, U33, U34); one Altera PLD labelled **CPU99A** under the pSOS+ label; OKI M82C54-2 U30, M82C59A-2 U28/U29, M82C51A-2 U37/U40/U43; Y1 SG51PH 50.0000 MHz; CPU soldered (QFP) under a clip-on heatsink; ADM202 U38; 2×5 pin header on the left edge (PLD JTAG?) | [P][H] |
 
 Memory and I/O maps are in `doc/SRX-611_firmware_architecture.md`.
+
+### 2.1 Unit 1 board — SRX6-CPU 1-658-652-11 (socketed CPU), photo 2026-11-08
+
+![SRX6-CPU 1-658-652-11, unit 1, SIO2 mezzanine removed](../img/hw/cpu_board_unit1.jpg)
+
+This is the earlier PCB revision, from the unit with the socketed i486. The mezzanine connectors along
+the top edge are empty in the photo because the SIO2 board has been removed. Board serial: `501438`.
+The boot EPROM socket is **U26**, which matches the dump `FW/SRX6-CPU/1/U26_M27C256B@DIP28.BIN`.
+This is controller **C61-1039**, the one matched at the factory with the owner's only arm, robot
+82790 (rear plates: `doc/robot_parameters.md`).
+
+| Ref | Part (photo) | Role | Source |
+|---|---|---|---|
+| socket (lower right) | i486 in a PGA socket under a clip-on heatsink; pSOS+ licence label "Integrated Systems SN 061321A" on the socket | CPU | [P] |
+| Y1 | Epson SG51PH 50.0000 MHz | CPU clock oscillator | [P] |
+| U22, U23 | 2× Altera EPM7064SLC84-10, labels **CPU01E** (U22) and **CPU02B** (U23) | glue logic / address decode | [P] |
+| U24, U25 | 2× Intel E28F400BVT60 (© '92 '94) | main firmware 2× 512 KB → `ROM1-C.bin`; the dump files are named `MT28F400B5-T` (programmer device profile) | [P][F] |
+| U26 | ST M27C256B-12F1 (UV window, label on it), DIP28 socket | boot EPROM, 32 KB | [P][F] |
+| **U50** | **Hitachi HN58C66FP-25T** (date 9720), SOP28 | **8 KB parameter EEPROM** (8K×8, 250 ns), CPU address `0x600000`, busy port `0x0C`; this is the chip `doc/emulator_plan.md` §6.1 needs dumped | [P][F: size and address match] |
+| U31, U32, U33, U34 | 4× Sony CXK581000BM-70LL (128K×8) | SRAM 512 KB | [P] |
+| (top, next to U34) | 0.47 F 5.5 V gold supercapacitor | back-up for SRAM/RTC (exactly which chips it powers is [H]) | [P] |
+| U41, U42, U43 | 3× NEC µPD71051-10 (8251A) | USART ch1 TP / ch2 PC / ch3 user | [P][F] |
+| U27 | NEC µPD71054-10 (8254) | timer | [P][F] |
+| U28, U29 | 2× NEC µPD71059-10 (8259A) | master/slave PIC | [P][F] |
+| U44 + one near J4 | 2× ADM202JRN | RS-232 drivers | [P] |
+| U5, U30, U40, U52, U53 | 74F245 / 74HC245 | data buffers | [P] |
+| U2, U19, U20, U45, U49, U21 | 74F74, 74HC14, 74HC74, 74AC04 and similar | misc logic | [P] |
+| U16 | small IC with a can crystal, marking unreadable | probably the RTC (MSM6242-class, ports `0x60–0x9C`) | [H] |
+| S1 | push button (top left) | RESET or SELF-CHECK | [P][H] |
+
+Compared with unit 2 (table above), this board uses NEC instead of OKI peripherals, Sony
+instead of Toshiba SRAM, and two visible EPM7064 PLDs. The memory and I/O maps are the
+same as far as the firmware shows.
+
+**Reading U50.** The HN58C66 has the standard JEDEC 28C64 pin-out, so a programmer reads
+it as a 28C64/AT28C64 (8192 bytes). Reading it in circuit with a SOIC-28 clip would power
+the rest of the board through VCC, so it is safer to lift the chip, or at least hold /WE
+high. Name the dump `FW/SRX6-CPU/1/U50_HN58C66@SOP28.BIN`; the emulator takes it as
+`emu/roms/srx_c61/eeprom.bin`.
+
+**Replacing the EEPROM (2026-11-08).** The write driver `0x6B1C` (major 5) sets what a
+substitute chip must do:
+
+- It writes **page-aligned blocks of up to 32 bytes** with interrupts off (`0xCDE08`/`0xCDE0C`),
+  so the chip needs **page mode with a page of ≥ 32 bytes**. A 28C64 with no page mode (byte
+  write only, e.g. Microchip 28C64A) will not work.
+- It then waits `tm_wkafter(1)` (one 10 ms tick, which can be shorter) and reads **port `0x0C`
+  bit 6 = write complete**. If the bit is still 0 after a second tick, it reports error `0x7919`.
+  It then reads the block back and reports `0x791A` on a mismatch. Bit 6 is most likely the
+  chip's **pin 1 RDY/BUSY** (open drain + pull-up); this is not traced yet.
+- So the substitute should have **RDY/BUSY on pin 1**. A chip with pin 1 = NC (Microchip
+  **AT28C64B**, AT28HC64B) leaves bit 6 at the pull-up level ("ready" at once). The read-back
+  can then come during the write cycle (≤ 10 ms) and fail now and then.
+- Candidates: the original HN58C66FP / HN58V66AFP (surplus, 32-byte page, RDY/BUSY);
+  **onsemi/Catalyst CAT28C64B** (32-byte page, RDY/BUSY on pin 1, discontinued); ST M28C64
+  (RDY/BUSY on pin 1, discontinued). AT28C64B-15SU (SOIC-28 300 mil) is the one in current
+  production. It works only if the timing margin above holds; check by test writes.
+- **The blank dumps are suspect (owner, 2026-11-08).** The programmer often reported "Device
+  unavailable or error", and a read succeeded only after the chip or socket was moved. That is
+  a contact fault in the SOP28 adapter, not proof of a dead chip. A read with /CE or /OE open
+  returns a floating bus, which is all `FF`, so a "blank" result needs repeated identical reads
+  through a reliable adapter. Do not write test data before that, or real data may be lost.
+- The package must fit: compare the U50/U26 body width and lead span with the SOIC-28 300 mil
+  (7.5 mm body, ~10.3 mm span) of the candidate.
 
 ---
 

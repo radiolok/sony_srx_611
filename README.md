@@ -193,6 +193,9 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`SRX-611_firmware_architecture.md`](doc/SRX-611_firmware_architecture.md) | CPU-firmware architecture report v2: pSOS+ kernel/BSP, drivers, IRQ/port/memory maps, tasks, TP / PC / RS-232C / servo-DPRAM interfaces (mermaid diagrams) |
 | [`SRX-611_error_401_DSS_report.md`](doc/SRX-611_error_401_DSS_report.md) | Error-reporting system + full `E000…E401` analysis; `E401 = DSS off` |
 | [`TP_firmware_structure.md`](doc/TP_firmware_structure.md) | Teach-pendant (HD64180) memory map, command dispatcher, `"SRX6"`↔`"TP4"` handshake |
+| [`paper_Kapusi2022_SCARA_DL.md`](doc/paper_Kapusi2022_SCARA_DL.md) | Notes on the 2022 Debrecen paper (YOLO + SRX-611): joint ranges, SRX Platform via XP VM + USB-RS232, LUNA examples, 3D CAD model (on request) |
+| [`robot_parameters.md`](doc/robot_parameters.md) | Known `.CTR` parameter values: factory plate of controller C61-1039 / robot 82790 (HOME PARA, calibrated arm lengths), TP parameter menus, E050 field list |
+| [`tp_menu_walkthrough.md`](doc/tp_menu_walkthrough.md) | Teach pendant in the emulator: key matrix → code → key map, menu screens (JP/EN), E050 boot, SYSTEM+MANAGE maintenance SETTING menu (CONTROLR / ROBOT), editor status |
 | [`LUNA_analysis.md`](doc/LUNA_analysis.md) | LUNA language subsystem analysis (companion to `FW/SRX6-CPU/2/c_decomp_luna/`) |
 | [`function_popularity.md`](doc/function_popularity.md) | All 1298 CPU functions ranked by call popularity + comments |
 | [`SRXWIN_tools_report.md`](doc/SRXWIN_tools_report.md) | PC-side host toolchain (`SRXWIN`): LUNA/POINT/PLC compilers & decompilers, SEND/RECALL/FILES/FDEL/HIST/MONIT, `INI_RS`, `LUNAPR`, MFC "SRX Platform" GUI (`SRXMONIE`), installer, formats, serial protocol |

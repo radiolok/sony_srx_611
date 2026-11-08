@@ -23,6 +23,10 @@ ARG MAKE_JOBS
 
 RUN git clone --depth 1 --branch "${MAME_VERSION}" https://github.com/mamedev/mame.git /src/mame
 
+# Fixes to MAME devices that the SRX-C61 model needs (see emu/patches/README.md).
+COPY patches /src/patches
+RUN cd /src/mame && for p in /src/patches/*.patch; do git apply "$p"; done
+
 # Install the SRX-C61 driver and register it in the driver list.
 COPY src/mame/sony/srx_c61.cpp /src/mame/src/mame/sony/srx_c61.cpp
 RUN sed -i '/^@source:sony\/taitogn\.cpp$/i @source:sony/srx_c61.cpp\nsrx_c61\n' /src/mame/src/mame/mame.lst

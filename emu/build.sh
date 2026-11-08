@@ -29,6 +29,15 @@ if [ ! -f "$MAME_DIR/makefile" ]; then
   git clone --depth 1 --branch "$MAME_VERSION" https://github.com/mamedev/mame.git "$MAME_DIR"
 fi
 
+# Apply the MAME device fixes the model needs (idempotent).
+for p in "$EMU_DIR"/patches/*.patch; do
+  if git -C "$MAME_DIR" apply --check "$p" 2>/dev/null; then
+    git -C "$MAME_DIR" apply "$p"
+  elif ! git -C "$MAME_DIR" apply --reverse --check "$p" 2>/dev/null; then
+    echo "patch $p does not apply to $MAME_DIR" >&2; exit 1
+  fi
+done
+
 # Install the driver and register it in the driver list.
 cp "$EMU_DIR/src/mame/sony/srx_c61.cpp" "$MAME_DIR/src/mame/sony/srx_c61.cpp"
 if ! grep -q '@source:sony/srx_c61\.cpp' "$MAME_DIR/src/mame/mame.lst"; then

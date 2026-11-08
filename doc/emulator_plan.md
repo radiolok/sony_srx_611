@@ -173,7 +173,7 @@ Known maps: architecture report §4.1 (memory), §4.2 (ports), §4.3 (interrupts
 | 8254 | `0xB0–0xBC`, input 3.072 MHz | ctr0 tick → slave IR2; ctr1/2 baud clocks |
 | 8259 ×2 | master `0xA0/A4`, slave `0xA8/AC`, cascade master IR7 | vectors `0x20/0x28` |
 | RTC | ports `0x60–0x9C`, 16 BCD registers | an MSM6242-like part; `msm6242` device or a small register model |
-| EEPROM 8 KB | memory `0x600000`, busy flag port `0x0C` | **content needed** (§6.1) |
+| EEPROM 8 KB | memory `0x600000`, port `0x0C` bit 6 = write complete | **done 2026-11-08:** MAME NVRAM `eeprom_nv`, saved to `nvram/srx_c61/eeprom_nv`; `eeprom.bin` is the default when no file exists. Content still needed (§6.1): both real chips are blank |
 | PC card | window `0x200000`, port `0x4C` bit 0 | empty slot at first; later an SRAM card image (FAT12) |
 | Slot latches | ports `0x30–0x40` | log; probably slot ID/IRQ routing [H] |
 | Diagnostic port | `0x20` (`0x0F` = fatal halt) | log every write: this is the boot progress indicator |
@@ -299,7 +299,7 @@ Priority: **P1** blocks a milestone, **P2** needed for a realistic run, **P3** n
 
 | # | Missing | Prio | Stub | How to obtain |
 |---|---|---|---|---|
-| 6.1 | **EEPROM 8 KB contents** (robot model, SLOT/AXIS, parameters) | P1 | Build an image from `sys_config_validate` (`0x8BD4`) and its field validators: list fields, legal ranges, checksum; fill with defaults for an SRX-611 L6015 with 4 axes on one servo slot | **Dump the chip from the CPU board** (find its part number on the board; read with a programmer). Do this before any other work on the real unit |
+| 6.1 | **EEPROM 8 KB contents** (robot model, SLOT/AXIS, parameters) | P1 | Build an image from `sys_config_validate` (`0x8BD4`) and its field validators: list fields, legal ranges, checksum; fill with defaults for an SRX-611 L6015 with 4 axes on one servo slot | **Dump the chip from the CPU board**: unit 1 (1-658-652-11) has it as **U50 Hitachi HN58C66FP-25T** (8K×8, SOP28, 28C64 pin-out), found 2026-11-08 (`doc/hardware_overview.md` §2.1); read it as a 28C64. **Result 2026-11-08: both chips read blank (all 0xFF)**: unit 1 U50 HN58C66FP-25T and unit 2 U26 HN58V66AFP-10. No real parameter image exists. The EEPROM holds the `.CTR` parameter block (RAM `0x4A24`–`0x622C`, 6153 bytes, architecture report §8.7); blank → E050 line 100, same as the emulator. Next sources: a `.CTR` backup, the unit-2 EEPROM, entering the parameters through the emulated TP (the firmware writes the EEPROM itself via `0x8AE4`, so the model needs persistent NVRAM), or synthesising from `0x8BD4`. Do this before any other work on the real unit |
 | 6.2 | Battery-backed SRAM / PC card (LUNA programs, points) | P3 | Empty; load programs later through SRXWIN-NG | Dump if the battery still holds |
 | 6.3 | CPU reset mapping (EPROM vs flash), RAM size probe | P1 | Map as in §3; trace the boot EPROM | Read the boot EPROM code; continuity of chip selects if unclear |
 | 6.4 | V810 interrupt sources and the `0x300000`/`0x500000` registers | P1 | Trace stubs; vector table from `0x7FE00` | Firmware first; then the S6S-* PLDs (read if not secured) and continuity |

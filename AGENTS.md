@@ -57,6 +57,12 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
     reproduce `ROM1-C.bin` (verified). Treat `ROM1-C.bin` as the authoritative image.
 - **Boot EPROM** = 32 KB `M27C256B` (socket U23 / U26), a separate x86 real-mode image.
   All three on-disk copies are identical (see the table).
+- The parameter EEPROM (8 KB at `0x600000`) is **U50 HN58C66FP-25T** on the unit-1 board
+  1-658-652-11. It was dumped 2026-11-08 and reads **blank (0xFF)**; unit 2's U26 HN58V66AFP-10 is blank too. It holds the `.CTR` parameter block
+  (RAM `0x4A24`–`0x622C`; blank → E050 line 100; architecture report §8.7). Every boot writes
+  `01 00` to EEPROM offset `0x200` (robot record 1), so a chip that is all `FF` there was never booted after
+  being erased, or the dump is suspect, and the emulator is blocked on it (`doc/emulator_plan.md` §6.1).
+  Board parts list: `doc/hardware_overview.md` §2.1.
 - CPU is an Intel/IBM 80486. The manual gives i486DX2 at 50 MHz internal (see
   `README.md` §1.2).
 
@@ -194,6 +200,7 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
 
 | Path | Meaning |
 |---|---|
+| `books/Application_of_Deep_Learning_in_the_Deployment_of_.pdf` | Kapusi et al., *Robotics* 2022, 11, 69 (YOLO on an SRX-611); notes in `doc/paper_Kapusi2022_SCARA_DL.md` |
 | `books/Sony+SRX+Scara+robot.pdf` | SRX operation manual (268 pp). Contains the **Error Code Guide** E000–E400. E401 is absent from it and from `SRXMONIE.HLP`; it is known only from the firmware. |
 | `SRXWIN/` | Sony host toolchain binaries (§2.5). |
 | `tools/ghidra/` | Ghidra headless setup: `import_rom1c.sh` (project with ROM1-C.bin at `0xFFE00000`), `SeedSrxFunctions.java` (pre-analysis seeding), `LabelSrxProtocol.java` (protocol labels), `DecompileByName.java` (print C). See §7 |
@@ -250,6 +257,9 @@ these:
 | `abs_encoder_protocol.md` | Serial absolute-encoder link: DSP SPORT0 receiver state machine, frame (2× 24-bit blocks, CRC-5 x⁵+x²+1), status byte, result in CXD8501R 24-bit counters `$3026/27`, `$302A/2B`, SERVO side |
 | `emulator_plan.md` | Whole-system emulator plan: MAME driver (i486, V810, 2× ADSP-2115, opt. Z180), board models, missing data + stub method, milestones, data to collect, first coding tasks |
 | `servo_dsp_link.md` | SERVO (V810) side of the DSP mailbox: V810 run-time layout, DSP windows `0x400000/0x400080`, pointer table, handshake, command list, axis↔DSP map, encoder conclusions |
+| `paper_Kapusi2022_SCARA_DL.md` | Notes on Kapusi et al. 2022 (`books/Application_of_Deep_Learning…pdf`): no firmware info; joint ranges (axis 1 220°, axis 2 ±150°), SRX Platform works via XP VM + CH341 USB-RS232, LUNA examples, SRX-611 3D CAD `.obj` available on request |
+| `robot_parameters.md` | Known `.CTR` parameter values for rebuilding the blank EEPROM: plate of controller C61-1039 / robot 82790 (HOME PARA 202108/172675/20190/0, L1 349.883, L2 249.755), TP parameter menus, E050 field list |
+| `tp_menu_walkthrough.md` | Emulated teach pendant: key map (matrix position → code → key; c4r6 = SYSTEM modifier, c6r1/2 = key-sheet sense → English), menu screens, maintenance SETTING menu via SYSTEM+MANAGE, CONTROLR field editor `0x9F69C`. Tools in `emu/tools/tp/` |
 
 ## 4. Target platform (CPU board, facts)
 
@@ -277,7 +287,7 @@ these:
   - 2 = 10 ms tick (8254 at `0xB0–0xBC`).
   - 3 = robot servo channel over **slot DPRAM windows** `0x700000+(slot−1)·0x10000`, slots 1–5.
   - 4 = RTC (ports `0x60–0x9C`).
-  - 5 = 8 KB EEPROM at `0x600000`.
+  - 5 = 8 KB EEPROM at `0x600000` (unit 1: **U50 Hitachi HN58C66FP-25T**, SOP28, not dumped yet).
   - The PC card window is at `0x200000` (port `0x4C` selects attribute memory).
 - **Interrupt hardware:** 8259A master at `0xA0/0xA4`, slave at `0xA8/0xAC` (vectors
   `0x20`/`0x28`). There is **no 8237 DMA**, and the "I/O board ports `0xC000…`" were a misread

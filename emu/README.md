@@ -14,10 +14,31 @@ frames when a peer is connected.
 
 The three serial channels open a pseudo terminal by default (MAME prints e.g.
 `SRX: serial ch1 (teach pendant) pty: /dev/pts/0`). Connect to that device from
-the host to drive the pendant / SRXWIN protocol. The 8 KB CPU-board EEPROM image
-is not available (plan §6.1): `make_roms.sh` creates a blank `eeprom.bin` on
-first run and never overwrites an existing one, so a real dump can be dropped
-in later.
+the host to drive the pendant / SRXWIN protocol.
+
+### Parameter EEPROM (persistent)
+
+The 8 KB CPU-board EEPROM holds the robot parameters (the `.CTR` block, see
+`doc/SRX-611_firmware_architecture.md` §8.7). Both real chips read blank, so the
+controller starts with **E050 line 100** until parameters are entered.
+
+- The EEPROM is a MAME NVRAM device. Its contents are saved on exit to
+  `nvram/srx_c61/eeprom_nv` (a raw 8192-byte image, the same layout as the chip)
+  and loaded on the next start. Parameters that the firmware writes are kept:
+  entered on the emulated pendant, or loaded as a `.CTR` file over the PC link.
+- The `eeprom.bin` ROM is only the **default**, used when no saved file exists.
+  `make_roms.sh` creates a blank (0xFF) one and never overwrites it. To start
+  again from `eeprom.bin`, delete `nvram/srx_c61/eeprom_nv`.
+- To program a real chip (HN58C66 / HN58V66A, as 28C64), take the
+  `eeprom_nv` file as it is.
+- Docker: the container keeps NVRAM in `/nvram`. Mount it to keep the data:
+  `docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/nvram:/nvram" srx-c61-emu`.
+  Without `--user`, the saved file belongs to root.
+- The firmware itself writes to the EEPROM at every boot. `sys_config_validate`
+  sets the first word of each of the 6 robot records to `1` (offsets `0x200`,
+  `0x5F4`, `0x9E8`, `0xDDC`, `0x11D0`, `0x15C4`). So a "blank" image is no
+  longer all `FF` after the first run. Test: `tests/eeprom_nvram.lua` (run it
+  twice with a scratch `-nvram_directory`).
 
 ## Layout
 
