@@ -10,7 +10,7 @@ name: emulator
 
 on:
   push:
-    branches: [master, srx-c61-emulator]
+    branches: [master]
     paths: ['emu/**', 'FW/**', '.github/workflows/emulator.yml']
   pull_request:
     paths: ['emu/**', 'FW/**', '.github/workflows/emulator.yml']
