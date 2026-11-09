@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsdl2-dev \
         libsdl2-ttf-dev \
         libfontconfig1-dev \
+        ccache \
     && rm -rf /var/lib/apt/lists/*
 
 ARG MAME_VERSION=mame0289
@@ -31,12 +32,26 @@ RUN cd /src/mame && for p in /src/patches/*.patch; do git apply "$p"; done
 COPY src/mame/sony/srx_c61.cpp /src/mame/src/mame/sony/srx_c61.cpp
 RUN sed -i '/^@source:sony\/taitogn\.cpp$/i @source:sony/srx_c61.cpp\nsrx_c61\n' /src/mame/src/mame/mame.lst
 
+# Compiler cache.  emu/ccache/ is empty in a normal checkout; CI restores it
+# from the GitHub Actions cache and extracts the updated /root/.ccache from
+# this stage afterwards (see .github/workflows/emulator.yml), so a driver-only
+# change rebuilds in minutes instead of compiling all of MAME again.
+COPY ccache /root/.ccache
+ENV CCACHE_DIR=/root/.ccache \
+    CCACHE_MAXSIZE=3G \
+    CCACHE_COMPRESS=1 \
+    CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
+
 WORKDIR /src/mame
-RUN make -j"${MAKE_JOBS:-$(nproc)}" \
+RUN ccache -z \
+    && make -j"${MAKE_JOBS:-$(nproc)}" \
         SOURCES=src/mame/sony/srx_c61.cpp \
         REGENIE=1 \
+        PRECOMPILE=0 \
+        OVERRIDE_CC="ccache gcc" OVERRIDE_CXX="ccache g++" \
         USE_QTDEBUG=0 \
-        NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 NO_USE_PULSEAUDIO=1 NO_USE_PIPEWIRE=1
+        NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 NO_USE_PULSEAUDIO=1 NO_USE_PIPEWIRE=1 \
+    && ccache -s
 
 # ---- runtime stage ----------------------------------------------------------
 FROM ubuntu:22.04

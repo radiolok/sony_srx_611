@@ -1,0 +1,63 @@
+name: emulator
+
+# Build the SRX-C61 MAME emulator image and run its smoke tests
+# (emu/tests/ci.sh): CPU <-> pendant handshake, a pendant key press after
+# 15 s (Z180 ASCI regression) and EEPROM persistence.
+#
+# A cold MAME build takes 1.5-2 h on a 4-core runner.  ccache (emu/ccache,
+# copied into the Docker build stage) is kept in the Actions cache, so a
+# driver-only change recompiles little more than the driver.
+
+on:
+  push:
+    branches: [master, srx-c61-emulator]
+    paths: ['emu/**', 'FW/**', '.github/workflows/emulator.yml']
+  pull_request:
+    paths: ['emu/**', 'FW/**', '.github/workflows/emulator.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    env:
+      CCACHE_KEY: ccache-${{ runner.os }}-${{ hashFiles('emu/Dockerfile', 'emu/patches/**') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: emu/ccache
+          key: ${{ env.CCACHE_KEY }}-${{ github.sha }}
+          restore-keys: |
+            ${{ env.CCACHE_KEY }}-
+            ccache-${{ runner.os }}-
+
+      - name: Build ROM set
+        run: emu/make_roms.sh
+
+      - name: Build emulator image
+        run: docker build -t srx-c61-emu emu
+
+      - name: Extract updated compiler cache
+        run: |
+          docker build --target build -t srx-c61-build emu
+          id=$(docker create srx-c61-build)
+          find emu/ccache -mindepth 1 ! -name .keep -delete
+          docker cp "$id:/root/.ccache/." emu/ccache/
+          docker rm "$id"
+          du -sh emu/ccache
+
+      - name: Save compiler cache
+        uses: actions/cache/save@v4
+        with:
+          path: emu/ccache
+          key: ${{ env.CCACHE_KEY }}-${{ github.sha }}
+
+      - name: Smoke tests
+        run: emu/tests/ci.sh srx-c61-emu

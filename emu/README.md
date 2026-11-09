@@ -85,6 +85,24 @@ cd emu
 
 `MAME_DIR` and `MAME_VERSION` select the checkout and release.
 
+## Tests and CI
+
+`emu/tests/ci.sh [image]` runs the smoke tests against a built image, each with a fresh
+NVRAM directory (about 20 s):
+
+1. The handshake between the real CPU and pendant firmwares (`SRX TP: handshake PASSED`).
+2. `tests/tp_keys.lua`: E050 is shown on the pendant at boot. F4 pressed at t = 15 s
+   (after the old Z180 ASCI desync point) closes it and shows the teach screen.
+3. `tests/eeprom_nvram.lua` run twice: the EEPROM contents persist.
+
+GitHub Actions (`.github/workflows/emulator.yml`) builds the image and runs `ci.sh` on
+pushes and PRs that touch `emu/`, `FW/` or the workflow. The Docker build uses
+**ccache**: `emu/ccache/` is copied into the build stage, and CI restores and saves
+it through the Actions cache, so a driver-only change does not recompile all of MAME.
+In a local checkout the directory is empty, which gives a normal full build. To keep a
+local cache, extract `/root/.ccache` from `docker build --target build` into
+`emu/ccache/`.
+
 ## Notes
 
 - The build uses `SOURCES=src/mame/sony/srx_c61.cpp` and `REGENIE=1`, so only the
