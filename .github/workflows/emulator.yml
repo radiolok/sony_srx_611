@@ -24,18 +24,20 @@ jobs:
   build-and-test:
     runs-on: ubuntu-22.04
     timeout-minutes: 300
-    env:
-      CCACHE_KEY: ccache-${{ runner.os }}-${{ hashFiles('emu/Dockerfile', 'emu/patches/**') }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compiler cache key
+        id: key
+        run: echo "prefix=ccache-${{ runner.os }}-${{ hashFiles('emu/Dockerfile', 'emu/patches/**') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore compiler cache
         uses: actions/cache/restore@v4
         with:
           path: emu/ccache
-          key: ${{ env.CCACHE_KEY }}-${{ github.sha }}
+          key: ${{ steps.key.outputs.prefix }}-${{ github.sha }}
           restore-keys: |
-            ${{ env.CCACHE_KEY }}-
+            ${{ steps.key.outputs.prefix }}-
             ccache-${{ runner.os }}-
 
       - name: Build ROM set
@@ -57,7 +59,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: emu/ccache
-          key: ${{ env.CCACHE_KEY }}-${{ github.sha }}
+          key: ${{ steps.key.outputs.prefix }}-${{ github.sha }}
 
       - name: Smoke tests
         run: emu/tests/ci.sh srx-c61-emu
