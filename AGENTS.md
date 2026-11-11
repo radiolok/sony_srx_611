@@ -21,9 +21,6 @@ Context file for AI coding agents working anywhere in this project.
    the `README.md` §4 table.
 4. **Ask when unsure.** If you are not sure about an idea, interpretation or direction,
    ask the user instead of deciding on your own.
-5. **Take care of machine resources.** The project may run on small nodes. Prefer light
-   tools (Python, capstone) over heavy ones (full Ghidra analysis, decompile-all), and ask
-   the user before starting any long-running heavy job.
 
 ## 1. What this project is
 
@@ -60,6 +57,18 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
     reproduce `ROM1-C.bin` (verified). Treat `ROM1-C.bin` as the authoritative image.
 - **Boot EPROM** = 32 KB `M27C256B` (socket U23 / U26), a separate x86 real-mode image.
   All three on-disk copies are identical (see the table).
+- The parameter EEPROM (8 KB at `0x600000`) is **U50 HN58C66FP-25T** on the unit-1 board
+  1-658-652-11. The 2026-11-08 dumps (all `FF`) were invalid: HN58x66 has **pin 26 = RES**, and it
+  was left open. The **valid dump** is `FW/SRX6-CPU/1/U50_AT28C64@SOIC28.bin` (2026-11-11; read as
+  an AT28C64 with pin 26 tied to VCC). It is the real `.CTR` block (RAM `0x4A24`–`0x622C`;
+  architecture report §8.7): kind `5B`, end marker `ED` at `0x1808`, `01 00` at `0x200`. It belongs
+  to controller **C61-1161** (L1 349.839, L2 249.857), not to plate C61-1039 / arm 82790. Field
+  decode: `doc/robot_parameters.md` §4. Unit 2's U26 HN58V66AFP-10 is dumped too:
+  `FW/SRX6-CPU/2/AT28C64@SOIC28.BIN` = controller **C61-1164**. The owner's arm is
+  **R.No. 82912 / C61-1173** (label on the arm: L1 349.847, L2 249.699, HOME PARA 200868/173395/18950/0).
+  Box 1 is C61-1039 (arm 82790), so no part on hand carries this arm's calibration. The block has **no checksum** (only the `0x8BD4` range checks). Patch a dump with
+  `tools/cpu/ctr_patch.py` (`doc/robot_parameters.md` §4.3–4.4).
+  Board parts list: `doc/hardware_overview.md` §2.1.
 - CPU is an Intel/IBM 80486. The manual gives i486DX2 at 50 MHz internal (see
   `README.md` §1.2).
 
@@ -104,6 +113,12 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
   `0xD8A8–0xD8AB` monitor-variable pokes; ack = command word back to 0. Axes 1/2 = DSP 1,
   axes 3/4 = DSP 2. Tool `tools/v810/v810dis.py`; report `doc/servo_dsp_link.md`;
   constants `FW/SRX6-SERVO/ROM_SERVO_periph.txt`.
+- **Interrupts (2026-11-11):** level 14 = **servo cycle** (`0xEA60` → `sub_692C`, cleared via
+  `0x308038`; mailbox `4` to the CPU every 16th tick). Level 15 = end of conversion of the ADC at
+  `0x304000`. CPU-link state machine `sub_7A20`: 0 → mailbox 1 → wait for command `0x10` → 2. The
+  8254 at `0x300000` (1.5625 MHz) is the UART clock and the cycle timer, not the cycle source.
+  Details: `doc/servo_dsp_link.md` §7. DSP mailbox `$3009`/`$300B` = **torque command** per motor
+  (axis struct `+0x1A8`, every cycle, `sub_2630`). ABS status byte bits 0–2 are active-low alarms.
 
 ### 2.4 Control board — 2× ADSP-2115 (dumps in `FW/SERVO_IO/`)
 
@@ -197,11 +212,15 @@ a modern cross-platform replacement for the 16-bit SRXWIN host tools (§2.5).
 
 | Path | Meaning |
 |---|---|
+| `books/Application_of_Deep_Learning_in_the_Deployment_of_.pdf` | Kapusi et al., *Robotics* 2022, 11, 69 (YOLO on an SRX-611); notes in `doc/paper_Kapusi2022_SCARA_DL.md` |
 | `books/Sony+SRX+Scara+robot.pdf` | SRX operation manual (268 pp). Contains the **Error Code Guide** E000–E400. E401 is absent from it and from `SRXMONIE.HLP`; it is known only from the firmware. |
 | `SRXWIN/` | Sony host toolchain binaries (§2.5). |
 | `tools/ghidra/` | Ghidra headless setup: `import_rom1c.sh` (project with ROM1-C.bin at `0xFFE00000`), `SeedSrxFunctions.java` (pre-analysis seeding), `LabelSrxProtocol.java` (protocol labels), `DecompileByName.java` (print C). See §7 |
 | `tools/ida/` | `rebase_ffe00000.py`: IDAPython script to rebase `ROM1-C.bin.i64` to `0xFFE00000` (run on a copy, on the workstation) |
-| `tools/cpu/` | `rom1c_raminit.py`: rebuilds the RAM image from ROM1-C.bin's init stream; finds strings' RAM addresses and pointer tables (§8.1). |
+| `tools/cpu/` | `rom1c_raminit.py`: rebuilds the RAM image from ROM1-C.bin's init stream; finds strings' RAM addresses and pointer tables (§8.1). `ctr_patch.py`: patches L1/L2/HOME PARA/serial into a parameter-EEPROM dump (no checksum to fix). |
+| `tools/model3d/` | LiDAR scan → articulated arm model: `build.sh` runs `dae_to_npz.py` → `segment.py` → Blender `build_blend.py` (Blender 4.5 LTS portable at `~/opt/blender-4.5.4-linux-x64`); `render_poses.py` / `labrender.py` previews. Output `emu/model/srx611.{glb,blend}`, `joints.json`, `cables.json`; raw scan in `emu/model/scan/`. Primitive model: `build_prim.sh` → `prim_cq.py` (CadQuery venv `~/opt/venv-cadquery`) → `build_prim_blend.py` → `bake_prim_textures.py` (scan texture with the labels baked onto base/link1/link2) → `emu/model/srx611_prim.{step,blend,glb}`, same J1–J4 nodes. Only the main cable is modelled. **Versioned:** `srx611_prim.{glb,step}`, `joints.json`, `cables.json`; the scan zip, `srx611.{glb,blend}` and `srx611_prim.blend` are local only (`.gitignore`). |
+| `img/3d/` | `srx611_final.jpg` = final look of the primitive model (versioned). The numbered intermediate pictures (scan views, slices, segmentation, poses) are **local only** (`.gitignore`). |
+| `doc/photos/` | Owner's photos of the arm (IMG_3585–3597, 2026-11-11): cable routing, top box on the Z/R shaft, quill gears/gripper, base flange and rear connector panel. **Not versioned** (owner: do not commit these photos). |
 | `tools/srxwin/` | Pure-Python helpers: `hlp_extract.py` (WinHelp 3.x → JSON/Markdown), `lunna_symtab.py` (LUNA symbol table), `srxmonie_cmds.py` (protocol frame-builder scan; needs `capstone`). |
 | `img/main.jpg` | Photo of the robot (used in `README.md`). |
 | `README.md` | Robot and controller specifications, firmware inventory, research status, doc index. |
@@ -253,6 +272,10 @@ these:
 | `abs_encoder_protocol.md` | Serial absolute-encoder link: DSP SPORT0 receiver state machine, frame (2× 24-bit blocks, CRC-5 x⁵+x²+1), status byte, result in CXD8501R 24-bit counters `$3026/27`, `$302A/2B`, SERVO side |
 | `emulator_plan.md` | Whole-system emulator plan: MAME driver (i486, V810, 2× ADSP-2115, opt. Z180), board models, missing data + stub method, milestones, data to collect, first coding tasks |
 | `servo_dsp_link.md` | SERVO (V810) side of the DSP mailbox: V810 run-time layout, DSP windows `0x400000/0x400080`, pointer table, handshake, command list, axis↔DSP map, encoder conclusions |
+| `paper_Kapusi2022_SCARA_DL.md` | Notes on Kapusi et al. 2022 (`books/Application_of_Deep_Learning…pdf`): no firmware info; joint ranges (axis 1 220°, axis 2 ±150°), SRX Platform works via XP VM + CH341 USB-RS232, LUNA examples, SRX-611 3D CAD `.obj` available on request |
+| `robot_parameters.md` | Known `.CTR` parameter values, including the decoded unit-1 EEPROM dump (C61-1161, §4): plate of controller C61-1039 / robot 82790 (HOME PARA 202108/172675/20190/0, L1 349.883, L2 249.755), TP parameter menus, E050 field list |
+| `robot_3d_model.md` | Arm 3D model from the owner's LiDAR scan (v2: plate L1/L2, scale 1.00528, J1 = 0 = forward/mid-stroke, quill top on J4, cables rebuilt as tubes, foot flange primitive; §8 primitive CadQuery model; lower unit = coupled 45° axis J5 via gears when the quill is raised, not modelled): fitted pivots, segmentation rules, node hierarchy `SRX611>J1>J2>J3>J4`, glTF axis mapping, MAME hookup plan (`output_finder` + `-output network` TCP 8000 → three.js viewer), open questions |
+| `tp_menu_walkthrough.md` | Emulated teach pendant: key map (matrix position → code → key; c4r6 = SYSTEM modifier, c6r1/2 = key-sheet sense → English), menu screens, maintenance SETTING menu via SYSTEM+MANAGE, CONTROLR field editor `0x9F69C`. Tools in `emu/tools/tp/` |
 
 ## 4. Target platform (CPU board, facts)
 
@@ -280,7 +303,7 @@ these:
   - 2 = 10 ms tick (8254 at `0xB0–0xBC`).
   - 3 = robot servo channel over **slot DPRAM windows** `0x700000+(slot−1)·0x10000`, slots 1–5.
   - 4 = RTC (ports `0x60–0x9C`).
-  - 5 = 8 KB EEPROM at `0x600000`.
+  - 5 = 8 KB EEPROM at `0x600000` (unit 1: **U50 Hitachi HN58C66FP-25T**, SOP28, pin 26 = RES; dumped 2026-11-11).
   - The PC card window is at `0x200000` (port `0x4C` selects attribute memory).
 - **Interrupt hardware:** 8259A master at `0xA0/0xA4`, slave at `0xA8/0xAC` (vectors
   `0x20`/`0x28`). There is **no 8237 DMA**, and the "I/O board ports `0xC000…`" were a misread
@@ -555,6 +578,10 @@ Lists"), and the codes are `E000…E400` only. E401 appears in neither the manua
   it in `history.md`.
 
 ## 12. Open work (as of 2026-09-26)
+
+- **Emulator (paused 2026-11-11):** the next steps are in `doc/emulator_plan.md` §12. First
+  find the source of E332–E335 (V810 "encoder UVW-phase" bit `0x10`), then E300/E380/E382,
+  then servo on and motion with the motor model.
 
 - CPU firmware:
   - Finish the decompilation (hand-reconstruct the switch-heavy functions, §8.2).

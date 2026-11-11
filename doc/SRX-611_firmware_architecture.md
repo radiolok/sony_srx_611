@@ -498,6 +498,49 @@ The exact slot population of the owner's unit cannot be read from the firmware; 
 | **PC card** (PCMCIA SRAM card, FAT12) | window at phys `0x200000`, port `0x4C` bit 0 = attribute memory (CIS read at even addresses) | `0xC87D4`, `0xC898C`, `0xC8B24`…; file ops `pccard_file_op` `0xCA6FC` | I |
 | **Optional 4-channel serial board** | memory `0x2000000` (status `0x2000010`), IRQ slave 6/7 | detected by `0x7E24`/`0x4B74`; INIT configures ch 1–4 at 9600 via `0x4D4C`; control blocks `0x4628[1..4]` | I |
 
+### 8.7 EEPROM contents = the `.CTR` robot parameters (2026-11-08)
+
+The 8 KB EEPROM (unit 1: U50 HN58C66FP-25T, pin 26 = RES) holds one block: the controller parameters, that is,
+the same data SRXWIN transfers as **`.CTR` / "Robot Data"** (kind byte `0x5B`).
+
+- **RAM image:** `0x4A24`–`0x622C`, size `0x1809` = 6153 bytes (`0xA8DC` returns it). It sits at
+  EEPROM offset 0.
+- **Load at boot:** INIT `0x6F8A` → `0x300F0` → `0x8A2C`. It reads the block with
+  `de_read(0x50000)`, then sets `[0x4A24]=0x5B` (kind), `[0x4A25]=0` and the end marker
+  `[0x622C]=0xED`. Next comes `sys_config_validate` `0x8BD4`. On failure INIT raises
+  `sys_req_27h(ch, line, code)`: code `0x1E` = **E030** if the driver read fails, or `0x32` =
+  **E050 "Controller parameter error"**. The line number is the first bad field (100 MODEL,
+  101 SERIAL No., … 116 SERVO PARAMETER; full list in `doc/SRXMONIE_help.md` §E050). After that
+  INIT **skips** the servo bring-up `0x74A4`.
+- **Write:** `0x8AE4` writes the RAM block back in ≤16-byte calls to `de_write` `0x8B74`. The
+  driver `0x6B1C` copies 32-byte pages, waits for port `0x0C` bit 6 and verifies them
+  (`0x7919` timeout, `0x791A` verify error). It is called when a kind-`0x5B` file arrives:
+  - from the PC link (`0x55C2C`);
+  - from the PC card (`0xCBB19`, error `0x5085`);
+  - from `0x14D49` (task-side load).
+- **Consequence:** a blank (0xFF) EEPROM makes the controller show **E050, line 100 (MODEL)**.
+  This is exactly what the emulator shows on the pendant (`ERR50 --- 00100`). A real unit with
+  a lost EEPROM recovers by loading a `.CTR` file (SRXWIN "Robot Data", or PC card), or by
+  entering the parameters on the TP.
+- **Robot records and a write at every boot** (found in the emulator 2026-11-08 with a write
+  tap on `0x600000`). The block contains up to **6 robot records of `0x3F4` (1012) bytes**,
+  starting at RAM `0x4830 + n·0x3F4` (n = 1…6). In EEPROM terms that is offset
+  `0x200 + (n−1)·0x3F4`: `0x200`, `0x5F4`, `0x9E8`, `0xDDC`, `0x11D0`, `0x15C4`. The robot
+  count byte is `[0x4A50]` (EEPROM offset `0x2C`).
+  - At the start of `sys_config_validate` `0x8BD4`, for n = 1…6, `0xC594` reads the first
+    word of record n. If it is not `1`, `0xC5DC` sets it to `1` and writes those 2 bytes
+    back through `0x8B74` → `de_write`. The call chain: INIT `0x6F8F` → `0x300F0` →
+    `0x8BD4` → `0xC5DC` → `0x8B74`.
+  - **Consequence for the dumps:** a chip that has been through even one boot of this
+    firmware holds `01 00` at EEPROM offset `0x200`. The first dumps (all `FF`) were wrong:
+    pin 26 of HN58x66 is RES and was left open. The valid unit-1 dump
+    `FW/SRX6-CPU/1/U50_AT28C64@SOIC28.bin` (2026-11-11) confirms the layout: `5B 00` at 0,
+    robot count 1 at `0x2C`, `01 00` at `0x200`, end marker `ED` at `0x1808`. Its field decode
+    (controller C61-1161) is in `doc/robot_parameters.md` §4.
+- **No checksum** over the block (2026-11-11): load, write and PC download copy it as it is. The
+  only check is the field validation in `0x8BD4`. Defaults: `0xA174`; serial setter `0xAB0C`; byte
+  settings array at RAM `0x6213` (1…18). Details: `doc/robot_parameters.md` §4.3.
+
 ---
 
 ## 9. Application internals

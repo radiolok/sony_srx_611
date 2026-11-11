@@ -1,0 +1,9 @@
+# Generated ROM set (run ./make_roms.sh)
+roms/
+
+# Saved NVRAM (parameter EEPROM image), see README "Parameter EEPROM"
+nvram/
+
+# Compiler cache filled by CI (see Dockerfile); keep the directory only
+ccache/*
+!ccache/.keep

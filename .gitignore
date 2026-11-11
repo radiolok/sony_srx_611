@@ -1,0 +1,8 @@
+# 3D model: local-only inputs and intermediates (doc/robot_3d_model.md)
+doc/photos/
+emu/model/scan/
+emu/model/*.blend
+emu/model/*.blend1
+emu/model/srx611.glb
+img/3d/[0-9][0-9]_*
+__pycache__/
