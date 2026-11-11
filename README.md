@@ -207,7 +207,7 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`control_board_firmware.md`](doc/control_board_firmware.md) | Control board (2× ADSP-2115) firmware, first pass: boot pages, DM map, interrupts, host mailbox commands, ADC mode |
 | [`abs_encoder_protocol.md`](doc/abs_encoder_protocol.md) | Serial absolute-encoder link: DSP SPORT0 state machine, frame format with CRC-5, where the 24-bit position and status land, SERVO side |
 | [`emulator_plan.md`](doc/emulator_plan.md) | Plan for a whole-system emulator (MAME driver running all original firmware): models per board, missing data and stubs, milestones |
-| [`robot_3d_model.md`](doc/robot_3d_model.md) | Articulated 3D model of the arm from a LiDAR scan (`emu/model/srx611.glb`/`.blend`) and a simplified CadQuery model from primitives (`srx611_prim.step/.glb`): pivots fitted on the scan, link segmentation, joint hierarchy J1–J4, plan to drive it from MAME outputs |
+| [`robot_3d_model.md`](doc/robot_3d_model.md) | Articulated 3D model of the arm: simplified CadQuery model from primitives with the scan texture (`emu/model/srx611_prim.glb/.step`, final look `img/3d/srx611_final.jpg`), built from a LiDAR scan: pivots fitted on the scan, link segmentation, joint hierarchy J1–J4, plan to drive it from MAME outputs |
 | [`servo_dsp_link.md`](doc/servo_dsp_link.md) | SERVO board (V810) side of the DSP mailbox: memory layout, DSP windows, handshake, commands (connect, servo on/off, serial ABS read, monitor pokes), axis map |
 
 The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md);
