@@ -21,7 +21,7 @@ run() {   # run <name> <nvram dir> <mame args...>
 		"$IMAGE" srx_c61 -video none -sound none -nothrottle "$@" \
 		> "$WORK/$name.log" 2>&1
 	echo "--- $name (exit $?)"
-	grep -E "tp_keys:|eeprom:|SRX TP: handshake|EEPROM:" "$WORK/$name.log" || true
+	grep -E "tp_keys:|eeprom:|servo_cycle:|SRX TP: handshake|EEPROM:" "$WORK/$name.log" || true
 }
 
 check() { # check <name> <pattern>
@@ -44,6 +44,16 @@ run eeprom1 "$WORK/nv_eeprom" -seconds_to_run 3 -autoboot_script /tests/eeprom_n
 check eeprom1 "eeprom: pattern written"
 run eeprom2 "$WORK/nv_eeprom" -seconds_to_run 3 -autoboot_script /tests/eeprom_nvram.lua
 check eeprom2 "eeprom: PASS"
+
+# 3. Servo cycle with a real .CTR block (unit-1 U50 dump patched for arm
+#    82912): V810 link state 2, level-14 cycle running, no E050/E030.
+REPO="$(cd "$TESTS/../.." && pwd)"
+mkdir -p "$WORK/nv_cycle/srx_c61"
+python3 "$REPO/tools/cpu/ctr_patch.py" "$REPO/FW/SRX6-CPU/1/U50_AT28C64@SOIC28.bin" \
+	"$WORK/nv_cycle/srx_c61/eeprom_nv" --l1 349.847 --l2 249.699 \
+	--home 200868 173395 18950 0 > /dev/null
+run cycle "$WORK/nv_cycle" -seconds_to_run 20 -autoboot_script /tests/servo_cycle.lua
+check cycle "servo_cycle: PASS"
 
 [ "$FAILED" -eq 0 ] && echo "all emulator smoke tests passed"
 exit "$FAILED"

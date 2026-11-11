@@ -34,9 +34,9 @@
         the DSP data maps use, so a command written by the V810 is executed
         by the DSP firmware and its write-back of 0 is what the V810 polls.
         No protocol logic is duplicated.
-      - The absolute-encoder/SPORT0 path stays a documented stub (plan
-        section 5.6 / doc/abs_encoder_protocol.md); no frame format is
-        invented here.
+      - The absolute-encoder/SPORT0 path was a stub here; the motor +
+        encoder model (stage 8, below the constants) now feeds it with the
+        frame format of doc/abs_encoder_protocol.md.
 
     A temporary self-test (SRX_STAGE3_SELFTEST) drives the window handlers
     with 0x8001/0x8002/0x8000 and reads the ack back through the same window.
@@ -151,6 +151,8 @@
 #include "machine/msm6242.h"
 #include "machine/nvram.h"
 #include "machine/pic8259.h"
+
+#include <cmath>
 #include "machine/pit8253.h"
 
 #include "dipty.h"
@@ -282,6 +284,51 @@ static constexpr uint32_t SERVO_ST_AMPRDY       = 0x00080000;
 static constexpr int DSP_IRQ1_HZ = 8000;    // ADC end-of-conversion / current loop
 static constexpr int DSP_IRQ2_HZ = 8000;    // supervision tick (heartbeat every 0x2000 ticks)
 
+// SERVO board servo-cycle interrupt: V810 level 14 (vector 0xFFFFFEE0 ->
+// 0xEA60 -> sub_692C).  The handler clears it by writing 0x308038 (PLD latch,
+// one per level 10-15 at 0x308028-0x30803C).  Phase 15 of every 16 ticks
+// writes mailbox 4, which is the CPU slot IRQ that paces SVTn, so the CPU
+// servo period is 16 ticks.  The real source is outside the V810's view
+// (PLD / Control board sync, plan 6.4).  The handler measures its own run
+// time with 8254 counter 0 and switches the servo off (sub_15B8/sub_1608)
+// when it exceeds 0x3A9 counts = 0.6 ms (0x6DC4), so the period is longer
+// than that: 1 kHz (CPU servo period 16 ms) is the guess.  8 kHz starved
+// the V810 main loop.  See doc/servo_dsp_link.md section 7.
+static constexpr int V810_CYCLE_IRQ = 14;
+static constexpr int SERVO_CYCLE_HZ = 1000;
+
+// SERVO board ADC at 0x304000 (pointer gp-0x39AC, set at 0x10C8E): a write
+// starts a conversion (sub_10EFC sets flag gp-0x39A0 = 1); V810 level 15
+// (vector -> 0x10F28) is end-of-conversion and reads four 16-bit results in
+// sequence (12-bit data << 4), then sets the flag to 2.  The servo cycle waits
+// for that flag inside the level-14 handler (sub_11024), so without level 15
+// the V810 hangs.  The chip is not identified; the four sequential reads
+// match an AD7874 like the Control board's.  Results are 0 (= 0 V bipolar).
+static constexpr int V810_ADC_IRQ = 15;
+
+// ------------------------------------------------------------------------
+//  Motor + encoder model (plan 5.6, doc/abs_encoder_protocol.md)
+// ------------------------------------------------------------------------
+//  Axis k (0..3) = DSP k/2, motor A (k even) or B (k odd).  The V810 sends one
+//  signed 16-bit torque command per motor every servo cycle (sub_102630:
+//  axis struct +0x1A8 = clamped float +0x1A4 -> CXD8501R mailbox word $3009
+//  for motor A, $300B for motor B).  The DSP current loop is taken as ideal,
+//  so torque = command and the motor is a rigid inertia with viscous
+//  friction, integrated at MOTOR_HZ.  Position is in encoder counts.
+//  MOTOR_ACCEL (counts/s^2 per command unit) and MOTOR_DAMP (1/s) are guesses
+//  until the motor/encoder data is known; the sign follows the counter.
+static constexpr int MOTOR_HZ = 4000;
+static constexpr double MOTOR_ACCEL = 2000.0;
+static constexpr double MOTOR_DAMP = 20.0;
+
+// Absolute encoder value (24-bit) at power-on: the HOME PARA of arm 82912
+// (doc/robot_parameters.md section 1.1), so every joint boots at its zero.
+static constexpr int32_t ABS_POWERON[4] = { 200868, 173395, 18950, 0 };
+
+// Serial ABS on DSP SPORT0: one 16-bit RX word per encoder bit, SCLK =
+// CLKOUT/56 (SP0_SCLKDIV = 27), 16 SCLK per word -> CLKOUT/896.
+static constexpr int SPORT_WORD_CYCLES = 896;
+
 
 // ------------------------------------------------------------------------
 //  Slot window state
@@ -338,6 +385,7 @@ public:
 		, m_dsp1_pm(*this, "dsp1_pm")
 		, m_dsp2_pm(*this, "dsp2_pm")
 		, m_pit(*this, "pit")
+		, m_servo_pit(*this, "servo_pit")
 		, m_pic_master(*this, "pic_master")
 		, m_pic_slave(*this, "pic_slave")
 		, m_uart(*this, "uart%u", 0U)
@@ -364,6 +412,7 @@ private:
 
 	// stage 4: CPU board peripherals
 	required_device<pit8254_device> m_pit;
+	required_device<pit8254_device> m_servo_pit;
 	required_device<pic8259_device> m_pic_master;
 	required_device<pic8259_device> m_pic_slave;
 	required_device_array<i8251_device, 3> m_uart;
@@ -525,6 +574,14 @@ private:
 	// Stage 1: SERVO on-board peripheral block (0x300000..).  Writes are
 	// logged; printable bytes are surfaced as console output.
 	uint32_t servo_console_r(offs_t offset);
+	void servo_cycle_ack_w(offs_t offset, uint32_t data, uint32_t mem_mask);
+	uint32_t servo_adc_r(offs_t offset, uint32_t mem_mask);
+	void servo_adc_w(offs_t offset, uint32_t data, uint32_t mem_mask);
+	void servo_adc_done(int unused);
+	emu_timer *m_servo_adc_timer;
+	uint8_t m_servo_adc_index;
+	void servo_cycle_tick(int unused);
+	emu_timer *m_servo_cycle_timer;
 	void servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask);
 
 	// Stage 3: SERVO DSP windows 0x400000/0x400080 -> CXD8501R register files.
@@ -536,6 +593,36 @@ private:
 	uint16_t m_adc[2][4];
 	unsigned m_adc_index[2];
 	uint16_t m_outlatch[2];
+
+	// motor + encoder model
+	struct motor_model
+	{
+		double pos;         // counts since power-on
+		double vel;         // counts/s
+		int32_t cnt_base;   // CXD8501R counter = cnt_base + pos
+	};
+	motor_model m_motor[4];
+	emu_timer *m_motor_timer;
+	emu_timer *m_sport_timer[2];
+	uint16_t m_sport_word[2];
+	uint16_t m_abs_stream[2][64];
+	unsigned m_abs_len[2];
+	unsigned m_abs_pos[2];
+	unsigned m_abs_frames[2];
+
+	void motor_tick(int unused);
+
+	// Lua override of V810-side CXD8501R reads (ports 0xFC-0xFF): select
+	// (bit 6 = DSP 2, bits 0-5 = register), value lo/hi, mode 0 off / 1 OR /
+	// 2 replace.  For probing which status bits the SERVO firmware tests.
+	uint8_t m_cxd_ovr_sel = 0;
+	uint16_t m_cxd_ovr_val = 0;
+	uint8_t m_cxd_ovr_mode = 0;
+	void sport_tick(int which);
+	void abs_build_frame(int which);
+	int32_t motor_counter(int k) const;
+	int32_t motor_abs(int k) const;
+	void motor_refresh_regs(int k);
 	uint16_t m_syscntl[2];
 	bool m_page1_active[2];
 	bool m_flagin_logged[2];
@@ -655,7 +742,7 @@ void srx_c61_state::maincpu_io_map(address_map &map)
 	//   0xF9 TP key rows for that column (bit set = pressed)
 	//   0xFA TP display read index (0-79, line-major)
 	//   0xFB TP display character at the index; reads auto-increment
-	map(0x00f0, 0x00fb).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
+	map(0x00f0, 0x00ff).rw(FUNC(srx_c61_state::lua_io_r), FUNC(srx_c61_state::lua_io_w));
 }
 
 // SERVO board (V810): ROM copied to RAM at 0 on boot.  gp = 0x2BAEC.
@@ -673,14 +760,15 @@ void srx_c61_state::servocpu_map(address_map &map)
 
 	// Stage 1: on-board peripherals, modelled as register stubs so the monitor
 	// runs without faulting.  The 0x30000x block is the baud/SCI setup.
-	map(0x00300000, 0x0030000f).rw(FUNC(srx_c61_state::servo_console_r), FUNC(srx_c61_state::servo_console_w));
+	map(0x00300000, 0x0030000f).rw(FUNC(srx_c61_state::servo_console_r), FUNC(srx_c61_state::servo_console_w)); // 8254 (servo_pit)
 	map(0x00301000, 0x00301003).ram();                         // output latch (LEDs / enables)
 	map(0x00302000, 0x00302003).ram();                         // DSP heartbeat / status
 	map(0x00303000, 0x00303003).ram();
-	map(0x00304000, 0x00304003).ram();
+	map(0x00304000, 0x00304003).rw(FUNC(srx_c61_state::servo_adc_r), FUNC(srx_c61_state::servo_adc_w)); // ADC, EOC = level 15
 	map(0x00305000, 0x0030502f).ram();
 	map(0x00307000, 0x00307003).ram();
 	map(0x00308000, 0x003080ff).ram();                         // LEDs / DIP / status
+	map(0x00308038, 0x0030803b).w(FUNC(srx_c61_state::servo_cycle_ack_w)); // level-14 latch clear
 	map(0x00309000, 0x00309003).ram();
 	map(0x00318000, 0x0031803f).ram();
 	map(0x00500000, 0x0050004f).ram();                         // CXD8477Q pair (stage 2/3)
@@ -1536,6 +1624,14 @@ void srx_c61_state::lua_io_w(offs_t offset, uint8_t data)
 		break;
 	case 10: m_tp_display_index = data % 80; break;
 	case 11: m_tp_display_index = data % 80; break;
+	case 12: m_cxd_ovr_sel = data; break;
+	case 13: m_cxd_ovr_val = (m_cxd_ovr_val & 0xff00) | data; break;
+	case 14: m_cxd_ovr_val = (m_cxd_ovr_val & 0x00ff) | (uint16_t(data) << 8); break;
+	case 15:
+		m_cxd_ovr_mode = data;
+		logerror("SRX PROBE: V810 CXD read override DSP%d $30%02X mode %d value %04X\n",
+				(m_cxd_ovr_sel >> 6 & 1) + 1, m_cxd_ovr_sel & 0x3f, data, m_cxd_ovr_val);
+		break;
 	default: break;                                     // readback/reserved registers
 	}
 	if (old_faults != m_safety_faults)
@@ -1627,21 +1723,30 @@ void srx_c61_state::safety_changed()
 // V810 only sees the safety chain through the DSP status/FLAG_IN path.
 uint32_t srx_c61_state::servo_console_r(offs_t offset)
 {
+	// 8254: registers at even byte addresses 0/2/4/6, data on the low byte.
 	offset <<= 2;                 // dword index -> byte offset
-	return 0;
+	uint32_t result = 0;
+	if (!machine().side_effects_disabled())
+	{
+		for (int half = 0; half < 2; half++)
+		{
+			offs_t const byteaddr = offset + half * 2;
+			if (byteaddr < 8)
+				result |= uint32_t(m_servo_pit->read(byteaddr >> 1)) << (16 * half);
+		}
+	}
+	return result;
 }
 
 void srx_c61_state::servo_console_w(offs_t offset, uint32_t data, uint32_t mem_mask)
 {
 	offset <<= 2;                 // dword index -> byte offset
-	for (int shift = 0; shift < 32; shift += 8)
+	for (int half = 0; half < 2; half++)
 	{
-		uint8_t const byte = (data >> shift) & 0xff;
-		uint32_t const m = (mem_mask >> shift) & 0xff;
-		if (m && byte >= 0x20 && byte < 0x7f)
-			logerror("SERVO console: '%c' (0x%02x) -> reg 0x30000%x\n", byte, byte, offset + (shift / 8));
+		offs_t const byteaddr = offset + half * 2;
+		if (byteaddr < 8 && (mem_mask >> (16 * half)) & 0xff)
+			m_servo_pit->write(byteaddr >> 1, uint8_t(data >> (16 * half)));
 	}
-	logerror("%s: SERVO reg 0x30000%x <- 0x%08x & 0x%08x\n", machine().describe_context(), offset, data, mem_mask);
 }
 
 
@@ -1668,7 +1773,9 @@ uint32_t srx_c61_state::servo_dsp_window_r(offs_t offset, uint32_t mem_mask)
 		offs_t const byteaddr = (offset & ~offs_t(3)) + lane;
 		int const which = (byteaddr & 0x80) ? 1 : 0;
 		offs_t const reg = (byteaddr & 0x7f) >> 1;
-		uint16_t const value = dsp_cxd_r(which, reg);
+		uint16_t value = dsp_cxd_r(which, reg);
+		if (m_cxd_ovr_mode && m_cxd_ovr_sel == ((which << 6) | reg))
+			value = (m_cxd_ovr_mode == 1) ? (value | m_cxd_ovr_val) : m_cxd_ovr_val;
 		uint8_t const byte = (byteaddr & 1) ? uint8_t(value >> 8) : uint8_t(value & 0xff);
 		result |= uint32_t(byte) << (8 * lane);
 	}
@@ -1802,6 +1909,16 @@ uint16_t srx_c61_state::dsp_cxd_r(int which, offs_t offset)
 	offset &= 0x3f;
 	uint16_t value = m_cxd[which].regs[offset];
 
+	// Encoder position counters follow the motor model.
+	if (offset == 0x26 || offset == 0x27 || offset == 0x2a || offset == 0x2b)
+	{
+		int32_t const c = motor_counter(which * 2 + (offset >= 0x2a ? 1 : 0));
+		if (offset == 0x26 || offset == 0x2a)
+			value = uint16_t(c & 0xffff);
+		else
+			value = (value & 0xff00) | uint16_t((c >> 16) & 0xff);
+	}
+
 	// Stage 5 fault injection: the mapping of the safety signals onto the
 	// CXD8501R status word is not decoded yet (plan 5.4/5.7), so only add
 	// the bits when a fault is active.  All-clear returns the stored value
@@ -1833,9 +1950,9 @@ void srx_c61_state::dsp_cxd_w(int which, offs_t offset, uint16_t data)
 	{
 		// Host mailbox command: the DSP writes 0 to acknowledge.
 		if (data != 0)
-			logerror("DSP%d mailbox <- %04X\n", which + 1, data);
+			logerror("DSP%d mailbox <- %04X (t=%.4f)\n", which + 1, data, machine().time().as_double());
 		else if (old != 0)
-			logerror("DSP%d mailbox ACK (command %04X)\n", which + 1, old);
+			logerror("DSP%d mailbox ACK (command %04X, t=%.4f)\n", which + 1, old, machine().time().as_double());
 		return;
 	}
 
@@ -1846,9 +1963,117 @@ void srx_c61_state::dsp_cxd_w(int which, offs_t offset, uint16_t data)
 	if (offset == 0x0025 && data == 0x0080)
 		m_adc_timer[which]->adjust(attotime::from_usec(5), which);
 
-	// $3026/$3027 and $302A/$302B are 24-bit position counters, the PWM
-	// registers $3033-$303C feed the plant.  The registers are stored as-is;
-	// plant coupling is stage 6.
+	// $3026/$3027 and $302A/$302B are 24-bit position counters: a write
+	// (DSP after an ABS read, or a SERVO preset) loads the counter, which then
+	// keeps counting with the motor.  $3027/$302B bits 15..8 hold the ABS
+	// status byte as written; bits 7..0 are counter bits 23..16.
+	if (offset == 0x26 || offset == 0x27 || offset == 0x2a || offset == 0x2b)
+	{
+		int const k = which * 2 + (offset >= 0x2a ? 1 : 0);
+		int32_t const cur = motor_counter(k);
+		int32_t const loaded = (offset == 0x26 || offset == 0x2a)
+				? ((cur & 0xff0000) | data)
+				: ((cur & 0x00ffff) | (int32_t(data & 0xff) << 16));
+		m_motor[k].cnt_base = loaded - int32_t(std::lround(m_motor[k].pos));
+		motor_refresh_regs(k);
+	}
+}
+
+int32_t srx_c61_state::motor_counter(int k) const
+{
+	return (m_motor[k].cnt_base + int32_t(std::lround(m_motor[k].pos))) & 0xffffff;
+}
+
+int32_t srx_c61_state::motor_abs(int k) const
+{
+	return (ABS_POWERON[k] + int32_t(std::lround(m_motor[k].pos))) & 0xffffff;
+}
+
+// Keep the stored register words current, so a V810 byte write that merges
+// with the stored half sees the live counter.
+void srx_c61_state::motor_refresh_regs(int k)
+{
+	cxd8501r_model &cxd = m_cxd[k >> 1];
+	int const lo = (k & 1) ? 0x2a : 0x26;
+	int32_t const c = motor_counter(k);
+	cxd.regs[lo] = uint16_t(c & 0xffff);
+	cxd.regs[lo + 1] = (cxd.regs[lo + 1] & 0xff00) | uint16_t((c >> 16) & 0xff);
+}
+
+// Rigid motor driven by the V810 torque command ($3009 motor A, $300B motor B).
+void srx_c61_state::motor_tick(int unused)
+{
+	double const dt = 1.0 / MOTOR_HZ;
+	for (int k = 0; k < 4; k++)
+	{
+		motor_model &m = m_motor[k];
+		int16_t const cmd = int16_t(m_cxd[k >> 1].regs[(k & 1) ? 0x0b : 0x09]);
+		double const accel = MOTOR_ACCEL * cmd - MOTOR_DAMP * m.vel;
+		m.vel += accel * dt;
+		m.pos += m.vel * dt;
+		motor_refresh_regs(k);
+	}
+}
+
+// One block of the serial ABS frame: c = 24 (start/frame, unchecked), 23
+// (spare, 0), 22 (block ID), 21..6 (16 data bits, MSB first), 5..1 (CRC-5,
+// x^5+x^2+1, zero init: the syndrome over bits 23..1 must be 0).
+static unsigned abs_block_bits(unsigned id, uint16_t data, uint16_t *out)
+{
+	uint32_t bits = (uint32_t(id & 1) << 21) | (uint32_t(data) << 5);  // bit c-1 = c
+	// T[c] = x^(c-1) mod g; CRC = XOR of T over the 1-bits of c = 6..23.
+	unsigned crc = 0;
+	for (int c = 6; c <= 23; c++)
+	{
+		if (!BIT(bits, c - 1))
+			continue;
+		unsigned t = 1;
+		for (int i = 1; i < c; i++)
+		{
+			t <<= 1;
+			if (t & 0x20)
+				t ^= 0x25;  // x^5 = x^2 + 1
+		}
+		crc ^= t;
+	}
+	bits |= crc & 0x1f;
+
+	unsigned n = 0;
+	for (int i = 0; i < 4; i++)
+		out[n++] = 0xffff;                      // idle high (>= 2 words)
+	out[n++] = 0x00ff;                          // start edge (sample mask -> bit 12)
+	for (int c = 24; c >= 1; c--)
+		out[n++] = BIT(bits, c - 1) ? 0xffff : 0x0000;
+	return n;
+}
+
+// Build one frame (block 1 = status byte + position 23..16, block 2 =
+// position 15..0) for the motor selected by output latch $3200 bit 0.
+void srx_c61_state::abs_build_frame(int which)
+{
+	int const k = which * 2 + (m_outlatch[which] & 1);
+	int32_t const pos = motor_abs(k);
+	// Status byte -> $3003 (motor A low byte, B high byte).  The V810 keeps
+	// it inverted (gp-0x3AA6/-0x3AA2, 0x1D7C) and raises alarms on bits 0-2
+	// when they read 0 (E350-E353 thermal is one of them), so 1 = OK.
+	// Bits 3-7 are not tested by the V810.
+	uint8_t const status = 0x07;
+	unsigned n = abs_block_bits(0, uint16_t((status << 8) | ((pos >> 16) & 0xff)), &m_abs_stream[which][0]);
+	n += abs_block_bits(1, uint16_t(pos & 0xffff), &m_abs_stream[which][n]);
+	m_abs_len[which] = n;
+	m_abs_pos[which] = 0;
+	m_abs_frames[which]++;
+}
+
+// SPORT0 RX: one word per encoder bit time; the DSP's RX handler reads RX0
+// (sport_rx callback) and runs its receiver state machine.
+void srx_c61_state::sport_tick(int which)
+{
+	if (m_abs_pos[which] >= m_abs_len[which])
+		abs_build_frame(which);
+	m_sport_word[which] = m_abs_stream[which][m_abs_pos[which]++];
+	dsp_set_line(which, ADSP2115_SPORT0_RX, ASSERT_LINE);
+	dsp_set_line(which, ADSP2115_SPORT0_RX, CLEAR_LINE);
 }
 
 void srx_c61_state::dsp_cxd_log(int which, offs_t offset, uint16_t data)
@@ -1895,7 +2120,12 @@ void srx_c61_state::dsp_latch_w(int which, uint16_t data)
 			logerror("DSP%d heartbeat bit 7 = %d\n", which + 1, (data >> 7) & 1);
 	}
 	if ((old ^ data) & 0x0001)
+	{
 		logerror("DSP%d ABS mux select = motor %c\n", which + 1, (data & 1) ? 'B' : 'A');
+		// The multiplexer is a plain switch: the line shows the other motor
+		// at once, so drop the rest of the current frame.
+		m_abs_pos[which] = m_abs_len[which];
+	}
 }
 
 uint16_t srx_c61_state::dsp_syscntl_r(int which)
@@ -1932,6 +2162,42 @@ void srx_c61_state::dsp_irq2_tick(int which)
 	dsp_set_flag_in(which, (m_safety_faults == 0) ? 1 : 0);
 	dsp_set_line(which, ADSP2115_IRQ2, ASSERT_LINE);
 	m_irq_clear_timer[which]->adjust(attotime::from_usec(2), which);
+}
+
+// V810 level-14 servo cycle: assert on every tick; the firmware's handler
+// clears the PLD latch at 0x308038 (sub_692C, every pass).
+void srx_c61_state::servo_cycle_tick(int unused)
+{
+	m_servocpu->set_input_line(V810_CYCLE_IRQ, ASSERT_LINE);
+}
+
+void srx_c61_state::servo_cycle_ack_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	m_servocpu->set_input_line(V810_CYCLE_IRQ, CLEAR_LINE);
+}
+
+// SERVO ADC: a write starts a conversion, EOC raises level 15 after 10 us,
+// the first result read drops it (AD7874 INT behaviour).
+void srx_c61_state::servo_adc_w(offs_t offset, uint32_t data, uint32_t mem_mask)
+{
+	m_servo_adc_index = 0;
+	m_servo_adc_timer->adjust(attotime::from_usec(10));
+}
+
+uint32_t srx_c61_state::servo_adc_r(offs_t offset, uint32_t mem_mask)
+{
+	if (!machine().side_effects_disabled())
+	{
+		if (m_servo_adc_index == 0)
+			m_servocpu->set_input_line(V810_ADC_IRQ, CLEAR_LINE);
+		m_servo_adc_index = (m_servo_adc_index + 1) & 3;
+	}
+	return 0;
+}
+
+void srx_c61_state::servo_adc_done(int unused)
+{
+	m_servocpu->set_input_line(V810_ADC_IRQ, ASSERT_LINE);
 }
 
 void srx_c61_state::dsp_irq_clear(int which)
@@ -2000,10 +2266,12 @@ void srx_c61_state::srx_c61(machine_config &config)
 	ADSP2115(config, m_dsp1, 16'000'000);
 	m_dsp1->set_addrmap(AS_PROGRAM, &srx_c61_state::dsp1_program_map);
 	m_dsp1->set_addrmap(AS_DATA, &srx_c61_state::dsp1_data_map);
+	m_dsp1->sport_rx().set([this] (offs_t port) -> uint32_t { return port ? 0 : m_sport_word[0]; });
 
 	ADSP2115(config, m_dsp2, 16'000'000);
 	m_dsp2->set_addrmap(AS_PROGRAM, &srx_c61_state::dsp2_program_map);
 	m_dsp2->set_addrmap(AS_DATA, &srx_c61_state::dsp2_data_map);
+	m_dsp2->sport_rx().set([this] (offs_t port) -> uint32_t { return port ? 0 : m_sport_word[1]; });
 
 	// ---- stage 7: teach pendant ----
 	// HD64180/Z180 at 6.144 MHz (a common value; the real crystal is not
@@ -2020,6 +2288,16 @@ void srx_c61_state::srx_c61(machine_config &config)
 	m_pit->set_clk<0>(3'072'000);
 	m_pit->set_clk<1>(3'072'000);
 	m_pit->set_clk<2>(3'072'000);
+
+	// SERVO board 8254 at V810 0x300000/2/4/6, 1.5625 MHz inputs (gp-0x3A14):
+	// counter 0 = servo-cycle run-time measurement (mode 0, read back by
+	// sub_1056C; a stuck 0 reads as a 42 ms overrun and makes the cycle
+	// switch the servo off every tick), counter 1 = monitor UART clock,
+	// counter 2 = mode 2 / 2 (use unknown).  See doc/servo_dsp_link.md 7.
+	PIT8254(config, m_servo_pit, 1'562'500);
+	m_servo_pit->set_clk<0>(1'562'500);
+	m_servo_pit->set_clk<1>(1'562'500);
+	m_servo_pit->set_clk<2>(1'562'500);
 	m_pit->out_handler<0>().set(FUNC(srx_c61_state::pit_out0_w));
 	m_pit->out_handler<1>().set(FUNC(srx_c61_state::pit_out1_w));
 	m_pit->out_handler<2>().set(FUNC(srx_c61_state::pit_out2_w));
@@ -2100,6 +2378,26 @@ void srx_c61_state::machine_start()
 	}
 	m_selftest_timer = timer_alloc(FUNC(srx_c61_state::dsp_selftest), this);
 
+	// Motor + encoder model.
+	for (int k = 0; k < 4; k++)
+	{
+		m_motor[k] = motor_model{ 0.0, 0.0, 0 };
+		save_item(NAME(m_motor[k].pos), k);
+		save_item(NAME(m_motor[k].vel), k);
+		save_item(NAME(m_motor[k].cnt_base), k);
+	}
+	m_motor_timer = timer_alloc(FUNC(srx_c61_state::motor_tick), this);
+	m_motor_timer->adjust(attotime::from_hz(MOTOR_HZ), 0, attotime::from_hz(MOTOR_HZ));
+	for (int i = 0; i < 2; i++)
+	{
+		m_sport_word[i] = 0xffff;
+		m_abs_len[i] = m_abs_pos[i] = m_abs_frames[i] = 0;
+		m_sport_timer[i] = timer_alloc(FUNC(srx_c61_state::sport_tick), this);
+	}
+	attotime const word = attotime::from_ticks(SPORT_WORD_CYCLES, m_dsp1->unscaled_clock());
+	m_sport_timer[0]->adjust(word, 0, word);
+	m_sport_timer[1]->adjust(word, 1, word);
+
 	// Load boot page 0 (loader/initialiser) of each DSP.  Page 0 reboots into
 	// page 1 by writing SYSCNTL, which our handler routes through BFORCE.
 	m_dsp1->load_boot_data(memregion("dsp1")->base(), m_dsp1_pm);
@@ -2115,6 +2413,11 @@ void srx_c61_state::machine_start()
 	m_irq1_timer[1]->adjust(attotime::from_hz(DSP_IRQ1_HZ), 1, attotime::from_hz(DSP_IRQ1_HZ));
 	m_irq2_timer[0]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 0, attotime::from_hz(DSP_IRQ2_HZ));
 	m_irq2_timer[1]->adjust(attotime::from_hz(DSP_IRQ2_HZ), 1, attotime::from_hz(DSP_IRQ2_HZ));
+	m_servo_cycle_timer = timer_alloc(FUNC(srx_c61_state::servo_cycle_tick), this);
+	m_servo_adc_timer = timer_alloc(FUNC(srx_c61_state::servo_adc_done), this);
+	m_servo_adc_index = 0;
+	save_item(NAME(m_servo_adc_index));
+	m_servo_cycle_timer->adjust(attotime::from_hz(SERVO_CYCLE_HZ), 0, attotime::from_hz(SERVO_CYCLE_HZ));
 
 	// ---- stage 5: slot windows, I/O boards, safety panel ----
 	std::fill(std::begin(m_slot_latch), std::end(m_slot_latch), 0);

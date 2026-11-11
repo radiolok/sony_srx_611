@@ -171,6 +171,27 @@ whatever the real line shows) → 24 bits (each 16 samples; the DSP samples at o
 the bit's start edge) → idle → block 2 the same way, repeated while the DSP listens. The CRC
 is x⁵+x²+1 over bits 23..6, zero initial value. Select motor A or B by `$3200` bit 0.
 
+### 8.1 Emulator model (2026-11-11)
+
+Implemented in `emu/src/mame/sony/srx_c61.cpp` and verified by `emu/tests/servo_cycle.lua`.
+All four ABSCOPY reads are acked in about 9.8 ms each and load the right counters.
+
+- **Line words:** idle `0xFFFF` ×4, start `0x00FF` (bit 15 = 0, first 1 at bit 7, so the
+  sample mask lands on bit 12), then 24 bit-words `0x0000`/`0xFFFF`. One word every 896 DSP
+  cycles on SPORT0 RX (the `sport_rx` callback feeds `RX0`).
+- The **start word is not shifted in as a bit.** `$0376` only sets the sample mask, and the
+  24 bits follow in the next words. [C]
+- The **mux** (`$3200` bit 0) drops the rest of the current frame when it switches. Without
+  that, the history (`$38C9…`) from the other motor plus one stale frame was accepted as
+  three equal frames.
+- **Status byte = `0x07`.** The V810 keeps `$3003` inverted (`gp-0x3AA6`/`-0x3AA2`, `0x1D7C`)
+  and tests bits 0–2 per motor (`0x01/0x02/0x04`, B: `0x100/0x200/0x400`). A **0 bit is an
+  alarm**; with status 0 the pendant showed E350–E353 (ABE encoder thermal). Bits 3–7 are
+  not tested. [C]
+- **MAME bug found (fixed by `emu/patches/0002`):** the multifunction "shift with register
+  move" ran the shift before reading the move source. `03BE: SR = LSHIFT AR (HI), MR1 = SR0`
+  then stored 0 as block 2 (position bits 15..0).
+
 ## 9. Open points
 
 1. Line coding: confirm Manchester vs plain NRZ-with-half-bit start on a logic analyser (one

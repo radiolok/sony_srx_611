@@ -1,0 +1,15 @@
+diff --git a/src/devices/cpu/adsp2100/adsp2100.cpp b/src/devices/cpu/adsp2100/adsp2100.cpp
+index 8a772539..dc0b9c37 100644
+--- a/src/devices/cpu/adsp2100/adsp2100.cpp
++++ b/src/devices/cpu/adsp2100/adsp2100.cpp
+@@ -1404,8 +1404,9 @@ void adsp21xx_device::execute_run()
+ 				break;
+ 			case 0x10:
+ 				// 00010000 0xxxxxxx xxxxxxxx  shift with internal data register move
+-				shift_op(op);
++				// the move reads its source before the shift, as the ALU/MAC forms do
+ 				temp = read_reg0(BIT(op, 0, 4));
++				shift_op(op);
+ 				write_reg0(BIT(op, 4, 4), temp);
+ 				break;
+ 			case 0x11:

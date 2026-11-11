@@ -147,8 +147,9 @@ Memory and I/O maps are in `doc/SRX-611_firmware_architecture.md`.
 This is the earlier PCB revision, from the unit with the socketed i486. The mezzanine connectors along
 the top edge are empty in the photo because the SIO2 board has been removed. Board serial: `501438`.
 The boot EPROM socket is **U26**, which matches the dump `FW/SRX6-CPU/1/U26_M27C256B@DIP28.BIN`.
-This is controller **C61-1039**, the one matched at the factory with the owner's only arm, robot
-82790 (rear plates: `doc/robot_parameters.md`).
+The box plate says controller **C61-1039** (robot 82790), but the owner's arm is robot **82912 /
+C61-1173**, and this board's EEPROM holds C61-1161. So the box, the board and the arm come
+from three different sets (`doc/robot_parameters.md` §1.1).
 
 | Ref | Part (photo) | Role | Source |
 |---|---|---|---|
@@ -173,11 +174,19 @@ Compared with unit 2 (table above), this board uses NEC instead of OKI periphera
 instead of Toshiba SRAM, and two visible EPM7064 PLDs. The memory and I/O maps are the
 same as far as the firmware shows.
 
-**Reading U50.** The HN58C66 has the standard JEDEC 28C64 pin-out, so a programmer reads
-it as a 28C64/AT28C64 (8192 bytes). Reading it in circuit with a SOIC-28 clip would power
-the rest of the board through VCC, so it is safer to lift the chip, or at least hold /WE
-high. Name the dump `FW/SRX6-CPU/1/U50_HN58C66@SOP28.BIN`; the emulator takes it as
-`emu/roms/srx_c61/eeprom.bin`.
+**Reading U50.** The HN58x66 parts are **not** a plain 28C64. Per the Hitachi HN58V65A/66A
+datasheet (ADE-203-539), the **66** variants have **pin 26 = RES** (reset/write protect), where the
+65 variants and the 28C64 have NC. Pin 1 = RDY/BUSY, the rest is the JEDEC 28C64 pin-out.
+While RES is low or floating the chip neither reads nor writes, and its outputs float (all `FF`).
+RES needs a CMOS high (input levels 0.4 V to VCC; leakage up to 100 µA). A 28C64 programmer
+leaves pin 26 open, which explains the "Device unavailable" errors and the all-`FF` dumps
+(2026-11-11). To read the chip, select a 28C64 / AT28C64 (8192 bytes) and **tie pin 26
+directly to pin 28 (VCC)** on the adapter. A large pull-up resistor will not do. The SOP is the
+400 mil FP-28D package. Reading in circuit with a SOIC-28 clip would power the rest of the
+board through VCC, so it is safer to lift the chip. Name the dump
+`FW/SRX6-CPU/1/U50_HN58C66@SOP28.BIN`; the emulator takes it as
+`emu/roms/srx_c61/eeprom.bin`. On the board, pin 26 is probably driven by the reset or
+power-fail circuit (not traced).
 
 **Replacing the EEPROM (2026-11-08).** The write driver `0x6B1C` (major 5) sets what a
 substitute chip must do:
@@ -201,8 +210,9 @@ substitute chip must do:
   a contact fault in the SOP28 adapter, not proof of a dead chip. A read with /CE or /OE open
   returns a floating bus, which is all `FF`, so a "blank" result needs repeated identical reads
   through a reliable adapter. Do not write test data before that, or real data may be lost.
-- The package must fit: compare the U50/U26 body width and lead span with the SOIC-28 300 mil
-  (7.5 mm body, ~10.3 mm span) of the candidate.
+- The package must fit. U50/U26 are 400 mil SOP (FP-28D), wider than the SOIC-28 300 mil
+  (7.5 mm body, ~10.3 mm span) of most substitutes. A substitute with NC on pin 26 ignores the
+  board's RES signal, which is harmless.
 
 ---
 

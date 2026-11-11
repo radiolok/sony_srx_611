@@ -194,7 +194,7 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`SRX-611_error_401_DSS_report.md`](doc/SRX-611_error_401_DSS_report.md) | Error-reporting system + full `E000…E401` analysis; `E401 = DSS off` |
 | [`TP_firmware_structure.md`](doc/TP_firmware_structure.md) | Teach-pendant (HD64180) memory map, command dispatcher, `"SRX6"`↔`"TP4"` handshake |
 | [`paper_Kapusi2022_SCARA_DL.md`](doc/paper_Kapusi2022_SCARA_DL.md) | Notes on the 2022 Debrecen paper (YOLO + SRX-611): joint ranges, SRX Platform via XP VM + USB-RS232, LUNA examples, 3D CAD model (on request) |
-| [`robot_parameters.md`](doc/robot_parameters.md) | Known `.CTR` parameter values: factory plate of controller C61-1039 / robot 82790 (HOME PARA, calibrated arm lengths), TP parameter menus, E050 field list |
+| [`robot_parameters.md`](doc/robot_parameters.md) | Known `.CTR` parameter values: the owner's arm 82912 / C61-1173 calibration, both decoded EEPROM dumps (C61-1161, C61-1164) with field offsets, box-1 plate C61-1039 / robot 82790, TP parameter menus, E050 field list |
 | [`tp_menu_walkthrough.md`](doc/tp_menu_walkthrough.md) | Teach pendant in the emulator: key matrix → code → key map, menu screens (JP/EN), E050 boot, SYSTEM+MANAGE maintenance SETTING menu (CONTROLR / ROBOT), editor status |
 | [`LUNA_analysis.md`](doc/LUNA_analysis.md) | LUNA language subsystem analysis (companion to `FW/SRX6-CPU/2/c_decomp_luna/`) |
 | [`function_popularity.md`](doc/function_popularity.md) | All 1298 CPU functions ranked by call popularity + comments |
@@ -207,6 +207,7 @@ Detailed analysis notes are collected in [`doc/`](doc):
 | [`control_board_firmware.md`](doc/control_board_firmware.md) | Control board (2× ADSP-2115) firmware, first pass: boot pages, DM map, interrupts, host mailbox commands, ADC mode |
 | [`abs_encoder_protocol.md`](doc/abs_encoder_protocol.md) | Serial absolute-encoder link: DSP SPORT0 state machine, frame format with CRC-5, where the 24-bit position and status land, SERVO side |
 | [`emulator_plan.md`](doc/emulator_plan.md) | Plan for a whole-system emulator (MAME driver running all original firmware): models per board, missing data and stubs, milestones |
+| [`robot_3d_model.md`](doc/robot_3d_model.md) | Articulated 3D model of the arm from a LiDAR scan (`emu/model/srx611.glb`/`.blend`) and a simplified CadQuery model from primitives (`srx611_prim.step/.glb`): pivots fitted on the scan, link segmentation, joint hierarchy J1–J4, plan to drive it from MAME outputs |
 | [`servo_dsp_link.md`](doc/servo_dsp_link.md) | SERVO board (V810) side of the DSP mailbox: memory layout, DSP windows, handshake, commands (connect, servo on/off, serial ABS read, monitor pokes), axis map |
 
 The project-wide agent context and per-address reference is [`AGENTS.md`](AGENTS.md);
@@ -222,4 +223,5 @@ the per-session work log is [`history.md`](history.md).
 | [`tools/srxwin/`](tools/srxwin) | SRXWIN helpers: WinHelp extractor, LUNA symbol-table dumper, SRXMONIE command scanner |
 | [`tools/v810/v810dis.py`](tools/v810) | NEC V810 linear disassembler with constant tracking and address-constant search — SERVO board firmware |
 | [`tools/adsp/adsp21xx.py`](tools/adsp) | ADSP-21xx boot-EPROM unpacker, disassembler (MAME port) and DM cross-reference — Control board DSPs |
+| [`tools/model3d/`](tools/model3d) | Scan → articulated arm model (`build.sh`: Collada reader, segmentation, Blender build, pose renders) and the simplified primitive model (`build_prim.sh`: CadQuery → STEP/glTF) |
 | [`emu/`](emu) | Whole-system MAME driver `sony/srx_c61` (stage 0: i486 + V810 + 2× ADSP-2115 boot), `build.sh`, `Dockerfile`, `make_roms.sh`, `README.md` — builds the `srx-c61-emu` container |

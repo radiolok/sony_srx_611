@@ -110,7 +110,86 @@ Worked out in detail in `doc/abs_encoder_protocol.md`. In short: [C][I]
   as signed 24-bit positions (`sub_0A08`) and can preset them.
 - Status byte per motor → `$3003`, read by the SERVO at `0x1D60`.
 
-## 7. Next steps
+## 7. CPU link state machine and servo-cycle interrupt (2026-11-11)
+
+Found while making the emulator run with a real `.CTR` block (`doc/emulator_plan.md` 6.1, 6.4).
+Run-time addresses (= file offsets), `gp = 0x2BAEC`.
+
+**Interrupt vectors.** V810 level *n* jumps through `0xFFFFFE00 + 0x10·n`, which is the top of
+the ROM image. Each slot holds a `jr` into the RAM copy:
+
+| Level | Handler | Role |
+|---|---|---|
+| 0–9 | `0x1A04` | common handler / unexpected interrupt [I] |
+| 10 / 11 / 12 | `0x1658` / `0x1784` / `0x18C4` | not traced |
+| 13 | `0xEA80` → `sub_E3A0` | not traced |
+| **14** | **`0xEA60` → `sub_692C`** | **servo cycle** [C] |
+| **15** | **`0x10F28`** | **ADC end-of-conversion** [C]: reads 4 results from `0x304000`, flag `gp-0x39A0 ← 2` |
+
+`0xEA60`/`0xEA80` save the full context (`sub_EAB4`), call the body, restore it (`sub_EB4C`) and
+`reti`. Start-up (`0x0196`–`0x01A6`) clears PSW.ID and the interrupt level, so all levels are
+enabled.
+
+**PLD interrupt latches** (`sub_EBE0`): `0x308028`, `0x30802C`, `0x308030`, `0x308034`,
+**`0x308038`**, `0x30803C` are cleared to 0 at start-up, and `0x308000 ← 0xFF`. The level-14 body
+writes `0x308038 ← 0` every cycle, so these are most likely the clear registers of levels 10–15
+(`0x308038` = level 14) [I]. The output latch `0x301000` (shadow `gp-0x39C0`; set bits
+`sub_106E8`, clear bits `sub_10724`) gets bit `0x40` pulsed in every cycle [C].
+
+**8254 on the V810 bus** (`0x300000`/`2`/`4`/`6`, input clock `gp-0x3A14` = **1 562 500 Hz**):
+counter 0 mode 0 reloaded `0xFFFF` at the top of each cycle (`sub_10528`, cycle-time measurement);
+counter 1 mode 2 = **monitor UART clock** (`sub_105CC`: 307200 or 153600 Hz = 16 × 19200 / 9600
+baud); counter 2 mode 2, count 2 (781 250 Hz out, use unknown). **None of them is the level-14
+source**, so level 14 comes from outside the firmware's view (PLD / Control board sync) [I].
+
+**CPU link state machine** `sub_7A20` (state `gp-0x3A2C`, called from the main loop):
+
+| State | Waits for | Then |
+|---|---|---|
+| 0 | handshake `+0x04` ≠ 0 and doorbell `+0x10` = 1 | mailbox `+0xFFC ← 1` (CPU IRQ), state 1 |
+| 1 | clears the doorbell; waits for **command `0x10`** in axis block 0 (`+0x100`) | clears per-axis data, `sub_01BC`, doorbell ← 1, state 2. After 10000 passes without it: mailbox `← 2` (timeout) |
+| 2 | — | running; the level-14 cycle does the work |
+
+**Servo cycle** `sub_692C` (level 14): a phase counter `gp-0x3A58` runs 0…15. Phases 0–7 go
+through table `0x6A7C`. While the link is up (flag `gp-0x3A84` = 1 and state 2), phases 8–15 go
+through table `0x6B44`. **Phase 15** (`0x6C6A`) copies the per-axis feedback to the DPRAM, writes
+the status word and then **mailbox `← 4`**. That IRQ paces the CPU's `SVTn` (architecture report
+§8.4). So **CPU servo period = 16 × level-14 period**.
+
+**ADC (level 15).** The ADC sits at `0x304000` (pointer `gp-0x39AC`, set at `0x10C8E`). A
+write starts a conversion (`sub_10EFC` sets flag `gp-0x39A0 = 1`). Level 15 reads four 16-bit
+results in sequence (12-bit data `<< 4`) and sets the flag to 2. When `gp-0x3AC0 = 1`, the
+level-14 cycle starts a conversion (`0x69C4`) and **busy-waits in the handler** for the flag
+(`sub_11024`), so a missing level 15 hangs the V810. The chip is not identified; four
+sequential reads match an AD7874 as on the Control board [I].
+
+**Cycle rate.** The cycle measures its own run time with 8254 counter 0. When it exceeds
+`0x3A9` counts = **0.6 ms** (`0x6DC4`), it switches the servo off: `sub_15B8`/`sub_1608` send
+`0x8000` to both DSPs and set output-latch fault bits. So the level-14 period is longer than
+0.6 ms. **1 kHz is the working guess** (CPU servo period 16 ms). 8 kHz starved the V810
+main loop in the emulator (2026-11-11).
+
+**Torque command (2026-11-11).** `sub_2630`, every cycle, writes the axis structure's
+`+0x1A8` (int16 = the float `+0x1A4` clamped to ±`+0x1AC` and truncated, `0x5B8C`–`0x5BB0`)
+to DSP mailbox word `$3009` (axis 1 → DSP 1, axis 3 → DSP 2) and `$300B` (axes 2, 4). This is
+the **motor torque (current) command** to the Control board. The emulator's motor model
+integrates it (`MOTOR_ACCEL`, `MOTOR_DAMP` are guesses).
+
+**8254 matters.** With a stub that read 0, counter 0 read back as a 42 ms run time. Every
+cycle then took the overrun path (`sub_15B8`/`sub_1608`) and wrote servo-off `0x8000` to both
+DSP mailboxes about 1000×/s. That overwrote every other DSP command, including ABSCOPY. The
+emulator now has a real `pit8254` there.
+
+**Still open: E332–E335.** The CPU calls this "AMP encoder break". It is bit `0x10` of the
+per-axis error word `0x2AE40[k]`, which `sub_9080` copies 1:1 into DPRAM `+0x100·(k+1)+0x38`.
+On the V810 side it matches the message "encoder UVW-phase signal error". The bit appears
+right after the four ABSCOPY reads (t ≈ 1.33 s, entering link state 2). It does not change
+when any of these inputs are forced: `0x301000`, `0x302000`, `0x303000`, `0x305000`,
+`0x307000`, `0x309000`, or CXD `$3021`, `$3023`, `$3030`, `$3031`, `$302D` (DSP 1). The
+setter is not found yet. `$3029`/`$302D` are read by the DSP, debounced and scaled
+(`sub_026D`); they look like speed/period inputs rather than UVW.
+
+## 8. Next steps
 
 1. Name the V810 functions around the mailbox (`0x0948`, `0x1110…0x1600`, `0x3080`, `0x0BB4`)
    via the monitor command table near string `0x23DE8` (`CONNECT`, `MODE`, `RMTCMD`,

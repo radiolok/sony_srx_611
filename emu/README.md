@@ -40,6 +40,26 @@ controller starts with **E050 line 100** until parameters are entered.
   longer all `FF` after the first run. Test: `tests/eeprom_nvram.lua` (run it
   twice with a scratch `-nvram_directory`).
 
+### Servo cycle (2026-11-11)
+
+With a real `.CTR` block in the EEPROM (`tools/cpu/ctr_patch.py`, see
+`doc/robot_parameters.md` §4.4), the firmwares now run the whole CPU ↔ SERVO cycle:
+
+- V810 **level 14** = servo cycle, 1 kHz timer (`SERVO_CYCLE_HZ`, a guess), cleared by a
+  write to `0x308038`.
+- V810 **level 15** = end of conversion of the SERVO-board ADC at `0x304000` (model returns 0).
+- Every 16th cycle the V810 writes mailbox `4`, and that IRQ paces the CPU `SVTn` task.
+
+Encoder model: each axis has a motor driven by the V810 torque command (`$3009`/`$300B`).
+The CXD8501R counters follow it, and the serial absolute encoder sends frames on DSP SPORT0
+(`doc/abs_encoder_protocol.md` §8.1). The V810's ABSCOPY loads the counters with
+200868 / 173395 / 18950 / 0 (arm 82912 HOME PARA, so the joints boot at zero). The 8254 on the
+SERVO bus is a real `pit8254`. The pendant still shows **E335**, because the "UVW-phase"
+input is not found yet (`doc/servo_dsp_link.md` §7). Probe: CPU I/O `0xFC` select
+(bit 6 = DSP 2, bits 0–5 = CXD register), `0xFD/0xFE` value, `0xFF` mode (1 = OR, 2 = replace)
+for V810-side CXD reads. Test: `tests/servo_cycle.lua` (run by `tests/ci.sh`). Background:
+`doc/servo_dsp_link.md` §7.
+
 ## Layout
 
 | Path | Purpose |
@@ -94,6 +114,8 @@ NVRAM directory (about 20 s):
 2. `tests/tp_keys.lua`: E050 is shown on the pendant at boot. F4 pressed at t = 15 s
    (after the old Z180 ASCI desync point) closes it and shows the teach screen.
 3. `tests/eeprom_nvram.lua` run twice: the EEPROM contents persist.
+4. `tests/servo_cycle.lua` with the U50 dump patched for arm 82912: V810 link state 2, cycle
+   at about 1 kHz, no E050/E030 (E335 is expected).
 
 GitHub Actions (`.github/workflows/emulator.yml`) builds the image and runs `ci.sh` on
 pushes and PRs that touch `emu/`, `FW/` or the workflow. The Docker build uses

@@ -299,7 +299,7 @@ Priority: **P1** blocks a milestone, **P2** needed for a realistic run, **P3** n
 
 | # | Missing | Prio | Stub | How to obtain |
 |---|---|---|---|---|
-| 6.1 | **EEPROM 8 KB contents** (robot model, SLOT/AXIS, parameters) | P1 | Build an image from `sys_config_validate` (`0x8BD4`) and its field validators: list fields, legal ranges, checksum; fill with defaults for an SRX-611 L6015 with 4 axes on one servo slot | **Dump the chip from the CPU board**: unit 1 (1-658-652-11) has it as **U50 Hitachi HN58C66FP-25T** (8K×8, SOP28, 28C64 pin-out), found 2026-11-08 (`doc/hardware_overview.md` §2.1); read it as a 28C64. **Result 2026-11-08: both chips read blank (all 0xFF)**: unit 1 U50 HN58C66FP-25T and unit 2 U26 HN58V66AFP-10. No real parameter image exists. The EEPROM holds the `.CTR` parameter block (RAM `0x4A24`–`0x622C`, 6153 bytes, architecture report §8.7); blank → E050 line 100, same as the emulator. Next sources: a `.CTR` backup, the unit-2 EEPROM, entering the parameters through the emulated TP (the firmware writes the EEPROM itself via `0x8AE4`, so the model needs persistent NVRAM), or synthesising from `0x8BD4`. Do this before any other work on the real unit |
+| 6.1 | **EEPROM 8 KB contents** (robot model, SLOT/AXIS, parameters) | P1 | Build an image from `sys_config_validate` (`0x8BD4`) and its field validators: list fields, legal ranges, checksum; fill with defaults for an SRX-611 L6015 with 4 axes on one servo slot | **Dump the chip from the CPU board**: unit 1 (1-658-652-11) has it as **U50 Hitachi HN58C66FP-25T** (8K×8, SOP28, 28C64 pin-out except **pin 26 = RES**), found 2026-11-08 (`doc/hardware_overview.md` §2.1); read it as a 28C64 with pin 26 tied to VCC. **Update 2026-11-11: valid unit-1 dump `FW/SRX6-CPU/1/U50_AT28C64@SOIC28.bin`** (real `.CTR` block of controller C61-1161, `doc/robot_parameters.md` §4). Put it in `emu/roms/srx_c61/eeprom.bin` (and delete `nvram/srx_c61/eeprom_nv`) to clear this blocker. **Run 2026-11-11** (U50 dump patched for arm 82912 with `tools/cpu/ctr_patch.py`, given as `eeprom_nv`, existing `srx-c61-emu` image, 40 s): **E050 is gone**. The block loads and passes `0x8BD4` (the EEPROM still holds `5B 00 09 18` after the run). INIT now runs the slot bring-up itself: CPU handshake `+0x04 <- FF`, doorbell `+0x10 <- 01`, V810 answers mailbox `01` → CPU IRQ acknowledged. `0x74CC` (channel 1 configured) = 1 from t ≈ 3 s. The pendant shows the boot banner `SRX-611`, then **E030 "システム エラー" line 16510 = `0x407E`**. Source: `0x3C570` (one of three similar functions, also `0x3C7CD`/`0x3C99D`). It requires `0x74CB[ch]==1`, sends command `{1,1}` with `q_send` to the channel's SVT queue (`[0x74A8+4ch]+0x74`), and waits with `q_receive` on `+0x78` for 1000 ticks; timeout → `0x407E`. So **the SVT task of channel 1 never answers**. Most likely the SVT servo cycle is not paced, because the model gives no periodic slot IRQ from the V810 (only one mailbox IRQ was seen; plan 6.4 is still a guess). The parameter blocker is closed; the next blocker is the SVT ↔ SERVO cycle IRQ. **Traced 2026-11-11** (MAME `-debug -debugger none` with Lua `debugger:command` breakpoints): `SVTn` ch1 blocks in `q_receive(0xD0000)` (`0x37B9B`). It ran one cycle (after the single mailbox-1 IRQ), received `{1,1}`, and wrote command `0x10` to `0x700100` and the doorbell. The V810 then went to link state 2 (t ≈ 2.95 s), but its servo cycle `sub_692C` never runs, so mailbox `4` (the periodic CPU IRQ) never comes. **The cycle is V810 interrupt level 14** (vector `0xFFFFFEE0` → `0xEA60`), cleared by writing `0x308038`. The model never asserts level 14. Fix: a periodic timer on V810 line 14, cleared on a write to `0x308038`. Rate unknown: CPU servo period = 16 × level-14 period. Details: `doc/servo_dsp_link.md` §7. **Done 2026-11-11:** the driver now has a periodic V810 **level-14** timer, `SERVO_CYCLE_HZ = 1000` (8 kHz starved the V810 main loop; the firmware's 0.6 ms overrun limit points to about 1 ms), cleared by a write to `0x308038`. It also has a **SERVO ADC model** at `0x304000`: a write starts a conversion, **level 15** fires after 10 µs, and four reads return 0. Without the ADC, the cycle hung inside the level-14 handler (`sub_11024`). Result: V810 link state 2, cycle at 1000 Hz, mailbox `4` → CPU IRQ every 16 ms, **E030 gone**. The pendant now shows **E335 "AMP Axis 4 encoder break error"**. This is expected, because encoders are not modelled yet (plan 5.6). Test: `emu/tests/servo_cycle.lua`, in `ci.sh`. **Encoder model done 2026-11-11 (plan 5.6):** motor per axis driven by the V810 torque command (`$3009`/`$300B`), CXD8501R counters follow it, serial ABS frames on DSP SPORT0 (format of `doc/abs_encoder_protocol.md`, status `0x07`). All four ABSCOPY reads ack and load 200868/173395/18950/0. Fixed on the way: a real `pit8254` on the V810 bus (the stub made every cycle overrun and spam servo-off), and MAME patch `0002` (ADSP shift+move order). E350–E353 and E319 are gone. Left: E300 (E-stop), E332–E335 (UVW-phase, source unknown), E380, E382 (`0x303000`). Lua probe ports `0xFC–0xFF` override V810-side CXD reads. The earlier result below is invalid, because pin 26 RES was left open and the outputs floated. Earlier result 2026-11-08, both chips read blank (all 0xFF): unit 1 U50 HN58C66FP-25T and unit 2 U26 HN58V66AFP-10. No real parameter image exists. The EEPROM holds the `.CTR` parameter block (RAM `0x4A24`–`0x622C`, 6153 bytes, architecture report §8.7); blank → E050 line 100, same as the emulator. Next sources: a `.CTR` backup, the unit-2 EEPROM, entering the parameters through the emulated TP (the firmware writes the EEPROM itself via `0x8AE4`, so the model needs persistent NVRAM), or synthesising from `0x8BD4`. Do this before any other work on the real unit |
 | 6.2 | Battery-backed SRAM / PC card (LUNA programs, points) | P3 | Empty; load programs later through SRXWIN-NG | Dump if the battery still holds |
 | 6.3 | CPU reset mapping (EPROM vs flash), RAM size probe | P1 | Map as in §3; trace the boot EPROM | Read the boot EPROM code; continuity of chip selects if unclear |
 | 6.4 | V810 interrupt sources and the `0x300000`/`0x500000` registers | P1 | Trace stubs; vector table from `0x7FE00` | Firmware first; then the S6S-* PLDs (read if not secured) and continuity |
@@ -409,3 +409,35 @@ In this order; stop at any step that risks damage.
    EEPROM fields (6.1), and the boot-EPROM entry for the reset mapping (6.3).
 5. Keep `history.md` and this plan up to date (mark stages done, move facts into the board
    reports).
+
+## 12. Next steps (paused 2026-11-11)
+
+State: the emulator boots with a real `.CTR` block (U50 patched for arm 82912). The CPU ↔
+SERVO cycle runs at 1 kHz, and the encoder model loads all four counters. The pendant shows
+E335. Error list at boot: E300, E332–E335, E380, E382. Ordered plan:
+
+1. **Find the E332–E335 source** ("encoder UVW-phase signal error", V810 error-word bit
+   `0x10`, set right after the four ABSCOPY reads). Leads:
+   - The bit appears when link state 2 is entered (`sub_7A20` → `sub_01BC`), so read the
+     rest of `sub_01BC` and the first level-14 passes. Look for code that writes the error
+     word through a computed pointer (not `movea -0x51C0`).
+   - The V810 debugger does not stop at breakpoints or watchpoints in our setup (i486 does).
+     Find out why (MAME V810 core hooks? `-debugger none`?), or add a temporary `logerror`
+     tap on V810 writes to `0x2AE40–0x2AE4F`.
+   - Probe DSP 2 CXD registers and `$3022`, `$3004–$3007` (mailbox status words) with Lua
+     ports `0xFC–0xFF`.
+   - Owner: a schematic or photos of the encoder connector wiring on the Control/SERVO
+     boards would narrow it down a lot.
+2. **E300 / E380 / E382:** E300 = E-stop (`0x1000`), E380 = `0x2000`, E382 = `0x10000000`
+   (cleared by `0x303000 = 0xFFFF`). Map them to real inputs: safety chain, `0x303000`
+   bits 12–14 (link init expects `& 0x7000 == 0x7000`), I/O boards. Then move the old fault
+   overlay from axis block `+0x00` to the real status field **`+0x38`** (the overlay is in
+   the wrong place now).
+3. **Servo on and motion:** once the alarms are clear, turn the servo on from the pendant
+   (or LUNA), check the sign and scale of the torque → counter loop (`MOTOR_ACCEL`,
+   `MOTOR_DAMP`, CNTR DIR), and tune until the V810 position loop holds still.
+4. **3D view:** drive `emu/model/srx611*.glb` from the motor positions
+   (`doc/robot_3d_model.md`).
+5. **Measure on hardware when the unit runs:** V810 level-14 rate (1 kHz guess), DSP
+   IRQ1/IRQ2 rates, DSP CLKOUT (ABS bit rate), SERVO ADC chip.
+6. Upstream MAME patches `0001` (Z180 ASCI) and `0002` (ADSP shift+move order).

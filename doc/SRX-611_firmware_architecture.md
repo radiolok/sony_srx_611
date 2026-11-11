@@ -500,7 +500,7 @@ The exact slot population of the owner's unit cannot be read from the firmware; 
 
 ### 8.7 EEPROM contents = the `.CTR` robot parameters (2026-11-08)
 
-The 8 KB EEPROM (unit 1: U50 HN58C66FP-25T) holds one block: the controller parameters, that is,
+The 8 KB EEPROM (unit 1: U50 HN58C66FP-25T, pin 26 = RES) holds one block: the controller parameters, that is,
 the same data SRXWIN transfers as **`.CTR` / "Robot Data"** (kind byte `0x5B`).
 
 - **RAM image:** `0x4A24`–`0x622C`, size `0x1809` = 6153 bytes (`0xA8DC` returns it). It sits at
@@ -532,10 +532,14 @@ the same data SRXWIN transfers as **`.CTR` / "Robot Data"** (kind byte `0x5B`).
     back through `0x8B74` → `de_write`. The call chain: INIT `0x6F8F` → `0x300F0` →
     `0x8BD4` → `0xC5DC` → `0x8B74`.
   - **Consequence for the dumps:** a chip that has been through even one boot of this
-    firmware holds `01 00` at EEPROM offset `0x200`, whether its parameters were valid or
-    blank. Both real chips read `FF` there. So either they were erased after their last
-    boot, or the firmware's write failed on the board, or the dump is wrong. Re-check the
-    reading before concluding that the data is lost.
+    firmware holds `01 00` at EEPROM offset `0x200`. The first dumps (all `FF`) were wrong:
+    pin 26 of HN58x66 is RES and was left open. The valid unit-1 dump
+    `FW/SRX6-CPU/1/U50_AT28C64@SOIC28.bin` (2026-11-11) confirms the layout: `5B 00` at 0,
+    robot count 1 at `0x2C`, `01 00` at `0x200`, end marker `ED` at `0x1808`. Its field decode
+    (controller C61-1161) is in `doc/robot_parameters.md` §4.
+- **No checksum** over the block (2026-11-11): load, write and PC download copy it as it is. The
+  only check is the field validation in `0x8BD4`. Defaults: `0xA174`; serial setter `0xAB0C`; byte
+  settings array at RAM `0x6213` (1…18). Details: `doc/robot_parameters.md` §4.3.
 
 ---
 
